@@ -5,8 +5,11 @@
 
 echo "Cleaning up Linux templates (preserving Windows templates)..."
 
-# Get all template IDs except Windows (91000+)
-TEMPLATES_TO_DESTROY=$(qm list | grep template | awk '$1 < 91000 {print $1}')
+# Linux templates only. The leading VMID digit is the kernel (1 Linux, 2
+# Windows), so Windows templates sit at 20000 and above. Match on the
+# template- name prefix rather than grepping the whole line, so a VM that just
+# happens to have "template" somewhere in its row is left alone.
+TEMPLATES_TO_DESTROY=$(qm list | awk '$1 ~ /^[0-9]+$/ && $1 < 20000 && $2 ~ /^template-/ {print $1}')
 
 if [ -z "$TEMPLATES_TO_DESTROY" ]; then
 	echo "No Linux templates found to destroy."

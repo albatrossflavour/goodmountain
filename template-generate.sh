@@ -76,19 +76,22 @@ calculate_base_id() {
 		*) echo 1190 ;;
 		esac
 		;;
+	# RHEL rebuilds that no longer fit in family 1, which has every version
+	# slot taken. They used to share RHEL and Rocky slots, so whichever built
+	# first claimed the VMID and the existence check skipped the other.
 	"Alma")
 		case "$version" in
-		8) echo 1110 ;; # Reuse RHEL 7 slot since similar
-		9) echo 1120 ;; # Reuse RHEL 8 slot since similar
-		*) echo 1190 ;;
+		8) echo 1710 ;;
+		9) echo 1720 ;;
+		*) echo 1790 ;;
 		esac
 		;;
 	"Oracle")
 		case "$version" in
-		7) echo 1170 ;; # Reuse Rocky 8 slot
-		8) echo 1180 ;; # Reuse Rocky 9 slot
-		9) echo 1130 ;; # Reuse RHEL 9 slot
-		*) echo 1190 ;;
+		7) echo 1810 ;;
+		8) echo 1820 ;;
+		9) echo 1830 ;;
+		*) echo 1890 ;;
 		esac
 		;;
 
@@ -193,7 +196,7 @@ get_dynamic_url() {
 		return 0
 		;;
 	"Ubuntu-"*)
-		if ! codename=$(get_ubuntu_codename "$version"); then
+		if codename=$(get_ubuntu_codename "$version"); then
 			echo "https://cloud-images.ubuntu.com/$codename/current/"
 			echo "$codename-server-cloudimg-amd64.img"
 			return 0
@@ -227,6 +230,20 @@ process_template() {
 	# Calculate template ID
 	BASE_ID=$(calculate_base_id "$NAME" "$VER")
 	TPROD=$((BASE_ID * 10))
+	TNAME="template-${NAME}-${VER}"
+
+	# Consumers clone by name, so two templates with the same name make every
+	# clone ambiguous. If this name already exists under a different VMID (left
+	# behind by an older numbering scheme), refuse rather than build a second
+	# one. This applies under FORCE_REBUILD too, which only ever destroys
+	# ${TPROD}. The old template may have linked clones hanging off it, so
+	# removing it is left to the operator.
+	OTHER_IDS=$(qm list 2>/dev/null | awk -v n="$TNAME" -v id="$TPROD" '$2 == n && $1 != id {printf "%s ", $1}')
+	if [ -n "$OTHER_IDS" ]; then
+		echo "  ✗ ${TNAME} already exists as VMID ${OTHER_IDS}but belongs at ${TPROD} - skipping"
+		echo "     Destroy the old one (after moving any linked clones off it), then rerun"
+		return
+	fi
 
 	# Skip templates that already exist unless a rebuild is explicitly forced.
 	# This runs before the ISO download and virt-customize, so a warm host only
@@ -234,7 +251,7 @@ process_template() {
 	# refresh a template that already exists (for example after an upstream image
 	# update).
 	if [ "${FORCE_REBUILD}" != "true" ] && qm status "${TPROD}" >/dev/null 2>&1; then
-		echo "  ✓ Template ${TPROD} (template-${NAME}-${VER}) already exists - skipping"
+		echo "  ✓ Template ${TPROD} (${TNAME}) already exists - skipping"
 		return
 	fi
 
@@ -306,7 +323,7 @@ process_template() {
 	fi
 
 	echo "  → Creating VM ${TPROD}..."
-	if ! qm create ${TPROD} --memory 1024 --core 2 --name template-"${NAME}"-"${VER}" --net0 virtio,bridge=vmbr1 --pool Templates --cpu cputype=host >/dev/null 2>&1; then
+	if ! qm create ${TPROD} --memory 1024 --core 2 --name "${TNAME}"--net0 virtio,bridge=vmbr1 --pool Templates --cpu cputype=host >/dev/null 2>&1; then
 		echo "  ✗ Failed to create template ${TPROD}"
 		# Check if this is a critical error (VM ID already exists)
 		if qm status ${TPROD} >/dev/null 2>&1; then

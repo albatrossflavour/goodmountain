@@ -17,7 +17,7 @@ The script started life in `proxform`, moved into igor as `scripts/template-gene
 | File | Purpose |
 | ---- | ------- |
 | `template-generate.sh` | Builds every template in `templates.csv` that doesn't already exist |
-| `template-clean.sh` | Destroys existing Linux templates so they can be rebuilt from scratch |
+| `template-clean.sh` | Destroys every Linux template (VMID below `20000`, name starting `template-`) so they can be rebuilt from scratch. Windows templates are left alone |
 | `templates.csv` | The list of templates to build: `Name,Version,URL,ISO` |
 
 ## Running it
@@ -48,11 +48,23 @@ Consumers clone by name, so the name and VMID scheme are the interface. Change t
 The base ID uses a `KFVE` scheme:
 
 - `K` is the kernel (`1` for Linux, `2` for Windows)
-- `F` is the family (Red Hat `1`, Debian `2`, SUSE `3`, Arch `4`, Amazon `5`, Fedora `6`)
+- `F` is the family (Red Hat `1`, Debian `2`, SUSE `3`, Arch `4`, Amazon `5`, Fedora `6`, Alma `7`, Oracle `8`)
 - `V` is the version slot within the family
 - `E` is the instance, which is always `0` today
 
-The mapping lives in `calculate_base_id()` in `template-generate.sh`.
+Alma and Oracle are Red Hat rebuilds, but family 1 has all nine version slots taken, so each gets a family of its own. The mapping lives in `calculate_base_id()` in `template-generate.sh`.
+
+Names have to be unique on the host. Before building, the generator checks whether a template with the same name exists under a different VMID. If it does, it refuses to build and tells you, even with `FORCE_REBUILD=true`, because a second copy would make every clone by that name ambiguous. It won't remove the old one for you. Your VMs are linked clones (`full_clone = false` in igor), so the old template may still have disks depending on it.
+
+## Moving off the old numbering
+
+Before September 2026, Alma used `11100`/`11200` and Oracle used `11700`, `11800` and `11300`, sharing slots with Red Hat and Rocky. On a host built under that scheme, the generator flags the old ones and skips them. To move each one over:
+
+1. Check nothing is a linked clone of it (`qm config` on your VMs, or destroy the environment first).
+2. `qm destroy <old vmid> --destroy-unreferenced-disks 1`
+3. Run `template-generate.sh` again. It builds the template at the new VMID under the same name, so nothing that clones it needs to change.
+
+`template-clean.sh` does the same job in bulk. It destroys every Linux template, old numbering included, and leaves Windows alone.
 
 ## What it assumes about the host
 
@@ -67,10 +79,3 @@ These are hardcoded, not configurable. They match the lab it was written for:
 
 RedHat images have no public URL (the CSV says `NULL`). Download them from the Red Hat portal and drop them into the ISO directory before running.
 
-## Known issues
-
-These came across with the code and haven't been fixed yet.
-
-- **Ubuntu can't be built from cold.** In `get_dynamic_url()` the codename check is inverted (`if ! codename=...`), so Ubuntu falls through to the CSV values, which are the literal string `DYNAMIC`. The download then fails. Ubuntu templates that already exist are skipped before this code runs, which is why nobody has noticed.
-- **VMID collisions.** Alma and Oracle reuse Red Hat and Rocky slots. With the current CSV, `RedHat-8` and `Alma-9` both land on `11200`, `RedHat-9` and `Oracle-9` on `11300`, and `Oracle-8` and `Rocky-9` on `11800`. Whichever one is built first takes the slot, and the existence check then skips the other.
-- **`template-clean.sh` destroys Windows too.** It keeps VMIDs of `91000` and above on the assumption that those are Windows templates, but the current scheme puts Windows 2022 at `21100`.
