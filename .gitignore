@@ -1,0 +1,6 @@
+# The cloud-init password file template-generate.sh reads. Written by the
+# caller at run time and removed afterwards; it must never be committed.
+config
+
+*.qcow2
+*.img
