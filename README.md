@@ -48,11 +48,11 @@ Consumers clone by name, so the name and VMID scheme are the interface. Change t
 The base ID uses a `KFVE` scheme:
 
 - `K` is the kernel (`1` for Linux, `2` for Windows)
-- `F` is the family (Red Hat `1`, Debian `2`, SUSE `3`, Arch `4`, Amazon `5`, Fedora `6`, Alma `7`, Oracle `8`)
+- `F` is the family (Red Hat `1`, Debian `2`, SUSE `3`, Arch `4`, Amazon `5`, Fedora `6`, Alma `7`, Oracle `8`, RHEL and Rocky 10 onwards `9`)
 - `V` is the version slot within the family
 - `E` is the instance, which is always `0` today
 
-Alma and Oracle are Red Hat rebuilds, but family 1 has all nine version slots taken, so each gets a family of its own. The mapping lives in `calculate_base_id()` in `template-generate.sh`.
+Alma and Oracle are Red Hat rebuilds, but family 1 has all nine version slots taken, so each gets a family of its own. RHEL and Rocky keep their 8 and 9 slots in family 1, and their 10 releases continue in family 9 (`19100` and `19200`). `1990` remains the fallback for unknown Linux. The mapping lives in `calculate_base_id()` in `template-generate.sh`.
 
 Names have to be unique on the host. Before building, the generator checks whether a template with the same name exists under a different VMID. If it does, it refuses to build and tells you, even with `FORCE_REBUILD=true`, because a second copy would make every clone by that name ambiguous. It won't remove the old one for you. Your VMs are linked clones (`full_clone = false` in igor), so the old template may still have disks depending on it.
 
@@ -77,5 +77,7 @@ These are hardcoded, not configurable. They match the lab it was written for:
 - a cloud-init user of `tgreen`, with the SSH key at `~/.ssh/igor.pub` on the host
 - `virt-customize` installed (from `libguestfs-tools`)
 
-RedHat images have no public URL (the CSV says `NULL`). Download them from the Red Hat portal and drop them into the ISO directory before running.
+RedHat images have no public URL (the CSV says `NULL`). Download them from the Red Hat portal and drop them into the ISO directory before running. RHEL 10 has a VMID slot but no CSV row. Add one with the filename of the image you download, for example `RedHat,10,NULL,rhel-10.1-x86_64-kvm.qcow2`.
+
+EL10 (RHEL, Rocky, Alma and Oracle 10) needs an x86-64-v3 CPU, which means AVX2. All three nodes in the current cluster support it. The templates use `cputype=host`, so clones get the real CPU flags. AlmaLinux also publishes an `x86_64_v2` build for older hardware, which the CSV doesn't use.
 

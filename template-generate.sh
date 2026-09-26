@@ -51,6 +51,15 @@ calculate_base_id() {
 	name="$1"
 	version="$2"
 
+	# RHEL and Rocky 10+ live in family 9 (see below)
+	case "$name" in
+	RedHat | Rocky)
+		case "$version" in
+		10) name="${name}10" ;;
+		esac
+		;;
+	esac
+
 	case "$name" in
 	# Red Hat Family (F=1): RHEL, CentOS, Rocky, Alma, Oracle
 	"RedHat")
@@ -83,6 +92,7 @@ calculate_base_id() {
 		case "$version" in
 		8) echo 1710 ;;
 		9) echo 1720 ;;
+		10) echo 1730 ;;
 		*) echo 1790 ;;
 		esac
 		;;
@@ -91,6 +101,7 @@ calculate_base_id() {
 		7) echo 1810 ;;
 		8) echo 1820 ;;
 		9) echo 1830 ;;
+		10) echo 1840 ;;
 		*) echo 1890 ;;
 		esac
 		;;
@@ -137,6 +148,11 @@ calculate_base_id() {
 		esac
 		;;
 
+	# EL10 onwards for RHEL and Rocky (F=9). Family 1 is full, so their newer
+	# releases continue here. 1990 stays the unknown Linux fallback.
+	"RedHat10") echo 1910 ;;
+	"Rocky10") echo 1920 ;;
+
 	# Fedora Family (F=6)
 	"Fedora")
 		case "$version" in
@@ -175,12 +191,12 @@ get_dynamic_url() {
 	fallback_iso="$4"
 
 	case "$name-$version" in
-	"Rocky-8" | "Rocky-9")
+	"Rocky-8" | "Rocky-9" | "Rocky-10")
 		echo "https://dl.rockylinux.org/pub/rocky/$version/images/x86_64/"
 		echo "Rocky-$version-GenericCloud-Base.latest.x86_64.qcow2"
 		return 0
 		;;
-	"Alma-8" | "Alma-9")
+	"Alma-8" | "Alma-9" | "Alma-10")
 		echo "https://repo.almalinux.org/almalinux/$version/cloud/x86_64/images/"
 		echo "AlmaLinux-$version-GenericCloud-latest.x86_64.qcow2"
 		return 0
@@ -294,9 +310,10 @@ process_template() {
 		VIRT_CMD="${VIRT_CMD} --install ${PACKAGES}"
 	fi
 
-	# SELinux configuration
-	if [ "${VER}" = "9" ] || [ "${VER}" = 8 ] || [ "${VER}" = "Stream" ]; then
-		VIRT_CMD="${VIRT_CMD} --edit /etc/sysconfig/selinux:s/enforcing/disabled/"
+	# SELinux configuration. Edit the real file: /etc/sysconfig/selinux is only
+	# a symlink to it on EL8 and isn't shipped from EL9 on.
+	if [ "${VER}" = "10" ] || [ "${VER}" = "9" ] || [ "${VER}" = 8 ] || [ "${VER}" = "Stream" ]; then
+		VIRT_CMD="${VIRT_CMD} --edit /etc/selinux/config:s/^SELINUX=enforcing/SELINUX=disabled/"
 	fi
 
 	# Machine ID and random seed cleanup (all systems)
@@ -308,8 +325,17 @@ process_template() {
 		VIRT_CMD="${VIRT_CMD} --run-command 'rm -f /var/lib/systemd/random-seed /var/lib/urandom/random-seed'"
 	fi
 
-	# Execute single batched virt-customize command (suppress output)
-	eval "$VIRT_CMD" >/dev/null 2>&1
+	# Execute single batched virt-customize command. Output goes to a log that
+	# is only shown on failure. A failed customise must stop here: carrying on
+	# builds a template without qemu-guest-agent, and every clone then sits out
+	# the provider's agent timeout.
+	if ! eval "$VIRT_CMD" >"${TMPISO}.log" 2>&1; then
+		echo "  ✗ virt-customize failed for ${TNAME}:"
+		tail -n 5 "${TMPISO}.log" | sed 's/^/     /'
+		rm -f "$TMPISO" "${TMPISO}.log"
+		return
+	fi
+	rm -f "${TMPISO}.log"
 
 	# Destroy the existing template before rebuilding. We only reach this point
 	# when the template did not exist, or when FORCE_REBUILD=true, so this is the

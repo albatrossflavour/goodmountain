@@ -3,10 +3,13 @@ RedHat,8,NULL,rhel-8.10-x86_64-kvm.qcow2
 RedHat,9,NULL,rhel-9.4-x86_64-kvm.qcow2
 Oracle,8,https://yum.oracle.com/templates/OracleLinux/OL8/u10/x86_64/,OL8U10_x86_64-kvm-b237.qcow2
 Oracle,9,https://yum.oracle.com/templates/OracleLinux/OL9/u4/x86_64/,OL9U4_x86_64-kvm-b234.qcow2
+Oracle,10,https://yum.oracle.com/templates/OracleLinux/OL10/u1/x86_64/,OL10U1_x86_64-kvm-b291.qcow2
 Rocky,8,DYNAMIC,DYNAMIC
 Rocky,9,DYNAMIC,DYNAMIC
+Rocky,10,DYNAMIC,DYNAMIC
 Alma,8,DYNAMIC,DYNAMIC
 Alma,9,DYNAMIC,DYNAMIC
+Alma,10,DYNAMIC,DYNAMIC
 Debian,12,https://cdimage.debian.org/images/cloud/bookworm/latest/,debian-12-genericcloud-amd64.qcow2
 Ubuntu,2204,DYNAMIC,DYNAMIC
 Ubuntu,2404,DYNAMIC,DYNAMIC
