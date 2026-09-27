@@ -45,6 +45,15 @@ STORAGE=${STORAGE:-ceph}              # Allow override with: STORAGE=local-lvm .
 FORCE_REBUILD=${FORCE_REBUILD:-false} # Set FORCE_REBUILD=true to rebuild templates that already exist
 PW=$(cat ./config)
 
+# Run a command quietly, but print the tail of its output if it fails, so the
+# reason a qm step failed is never thrown away.
+quiet() {
+	out=$("$@" 2>&1) && return 0
+	rc=$?
+	printf '%s\n' "$out" | tail -n 5 | sed 's/^/     /'
+	return $rc
+}
+
 # ID Calculation Functions - KFVEE format
 # K=Kernel (1=Linux,2=Windows), F=Family(0-9), V=Version(0-9), EE=Instance(00-99)
 calculate_base_id() {
@@ -342,14 +351,14 @@ process_template() {
 	# forced-refresh path (the early skip above handles the default warm case).
 	if qm status ${TPROD} >/dev/null 2>&1; then
 		echo "  → Destroying existing template ${TPROD} (force rebuild)..."
-		qm destroy ${TPROD} --destroy-unreferenced-disks 1 >/dev/null 2>&1 || {
+		quiet qm destroy ${TPROD} --destroy-unreferenced-disks 1 || {
 			echo "  ✗ Could not destroy template ${TPROD}, it may be in use"
 			return
 		}
 	fi
 
 	echo "  → Creating VM ${TPROD}..."
-	if ! qm create ${TPROD} --memory 1024 --core 2 --name "${TNAME}"--net0 virtio,bridge=vmbr1 --pool Templates --cpu cputype=host >/dev/null 2>&1; then
+	if ! quiet qm create ${TPROD} --memory 1024 --core 2 --name "${TNAME}" --net0 virtio,bridge=vmbr1 --pool Templates --cpu cputype=host; then
 		echo "  ✗ Failed to create template ${TPROD}"
 		# Check if this is a critical error (VM ID already exists)
 		if qm status ${TPROD} >/dev/null 2>&1; then
@@ -377,57 +386,57 @@ process_template() {
 	fi
 
 	echo "  → Configuring template..."
-	if ! qm set $TPROD --scsihw virtio-scsi-pci --scsi0 "${IMPORTED_DISK}" >/dev/null 2>&1; then
+	if ! quiet qm set $TPROD --scsihw virtio-scsi-pci --scsi0 "${IMPORTED_DISK}"; then
 		echo "  ✗ Could not attach disk to template ${TPROD}"
 		qm destroy ${TPROD} --destroy-unreferenced-disks 1 2>/dev/null
 		rm -f "$TMPISO"
 		return
 	fi
-	if ! qm set $TPROD --ide3 "${STORAGE}":cloudinit >/dev/null 2>&1; then
+	if ! quiet qm set $TPROD --ide3 "${STORAGE}":cloudinit; then
 		echo "  ✗ Could not create cloud-init disk for template ${TPROD}"
 		qm destroy ${TPROD} --destroy-unreferenced-disks 1 2>/dev/null
 		rm -f "$TMPISO"
 		return
 	fi
-	qm set $TPROD --boot c --bootdisk scsi0 >/dev/null 2>&1 || {
+	quiet qm set $TPROD --boot c --bootdisk scsi0 || {
 		echo "  ✗ Error setting boot"
 		return
 	}
-	qm set $TPROD --serial0 socket --vga serial0 >/dev/null 2>&1 || {
+	quiet qm set $TPROD --serial0 socket --vga serial0 || {
 		echo "  ✗ Error setting serial"
 		return
 	}
-	qm set $TPROD --agent enabled=1 >/dev/null 2>&1 || {
+	quiet qm set $TPROD --agent enabled=1 || {
 		echo "  ✗ Error setting agent"
 		return
 	}
-	qm set $TPROD --tag "template,${LCNAME}" >/dev/null 2>&1 || {
+	quiet qm set $TPROD --tag "template,${LCNAME}" || {
 		echo "  ✗ Error setting tags"
 		return
 	}
-	qm set $TPROD --ciupgrade 0 >/dev/null 2>&1 || {
+	quiet qm set $TPROD --ciupgrade 0 || {
 		echo "  ✗ Error setting ciupgrade"
 		return
 	}
-	qm set $TPROD --ciuser tgreen >/dev/null 2>&1 || {
+	quiet qm set $TPROD --ciuser tgreen || {
 		echo "  ✗ Error setting ciuser"
 		return
 	}
-	qm set $TPROD --cipassword "$PW" >/dev/null 2>&1 || {
+	quiet qm set $TPROD --cipassword "$PW" || {
 		echo "  ✗ Error setting password"
 		return
 	}
-	qm set $TPROD --sshkeys ~/.ssh/igor.pub >/dev/null 2>&1 || {
+	quiet qm set $TPROD --sshkeys ~/.ssh/igor.pub || {
 		echo "  ✗ Error setting ssh keys"
 		return
 	}
-	qm set $TPROD --ipconfig0 ip=dhcp >/dev/null 2>&1 || {
+	quiet qm set $TPROD --ipconfig0 ip=dhcp || {
 		echo "  ✗ Error setting network"
 		return
 	}
 
 	echo "  → Converting to template..."
-	qm template $TPROD >/dev/null 2>&1 || {
+	quiet qm template $TPROD || {
 		echo "  ✗ Failed to convert VM ${TPROD} to template"
 		return
 	}
@@ -455,6 +464,8 @@ cat $TEMPLATES | grep -Ev "^[[:space:]]*#" | grep -v "^[[:space:]]*$" | grep -v 
 	echo ""
 	echo "=== [$TEMPLATE_COUNT/$TOTAL_TEMPLATES] Processing: $(echo "$LINE" | awk -F, '{print $1" "$2}') ==="
 	process_template "$LINE"
+	# Each template's working copy is prod-<image>; clear it whatever the outcome
+	rm -f "${BASEDIR}"/prod-*
 done
 
 echo ""
