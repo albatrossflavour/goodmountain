@@ -296,10 +296,15 @@ process_template() {
 
 	if [ ! -f "${ISODIR}/${ISO}" ]; then
 		echo "  → Downloading ${ISO}..."
-		wget -q "${URL}${ISO}" -O "${ISODIR}/${ISO}" || {
+		# Download to a .part file and only rename it into place once complete.
+		# The cache is keyed on the file existing, so a partial file left by an
+		# interrupted or overlapping download would otherwise be reused forever.
+		if ! quiet wget -q "${URL}${ISO}" -O "${ISODIR}/${ISO}.part"; then
 			echo "  ✗ Download failed"
+			rm -f "${ISODIR}/${ISO}.part"
 			return
-		}
+		fi
+		mv "${ISODIR}/${ISO}.part" "${ISODIR}/${ISO}"
 	fi
 
 	TMPISO="${BASEDIR}/prod-${ISO}"
@@ -447,6 +452,15 @@ process_template() {
 }
 
 # Main execution - sequential processing
+
+# One run at a time. Two runs share BASEDIR and the same VMIDs, so an
+# overlapping run can destroy the other's template or its working copy.
+exec 9>"${BASEDIR}/.goodmountain.lock"
+if ! flock -n 9; then
+	echo "Another template-generate.sh run holds ${BASEDIR}/.goodmountain.lock; not starting." >&2
+	exit 1
+fi
+
 echo "Starting template generation..."
 
 # Check prerequisites before starting
@@ -463,9 +477,11 @@ cat $TEMPLATES | grep -Ev "^[[:space:]]*#" | grep -v "^[[:space:]]*$" | grep -v 
 	TEMPLATE_COUNT=$((TEMPLATE_COUNT + 1))
 	echo ""
 	echo "=== [$TEMPLATE_COUNT/$TOTAL_TEMPLATES] Processing: $(echo "$LINE" | awk -F, '{print $1" "$2}') ==="
+	TMPISO=""
 	process_template "$LINE"
-	# Each template's working copy is prod-<image>; clear it whatever the outcome
-	rm -f "${BASEDIR}"/prod-*
+	# Remove this template's working copy whatever the outcome. Only this one:
+	# a glob here once deleted another run's copy mid-import.
+	[ -n "$TMPISO" ] && rm -f "$TMPISO" "${TMPISO}.log"
 done
 
 echo ""
