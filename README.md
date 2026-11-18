@@ -22,19 +22,18 @@ The script started life in `proxform`, moved into igor as `scripts/template-gene
 
 ## Running it
 
-The scripts expect to run from a working directory on the Proxmox host, with `templates.csv` and a file called `config` next to them. `config` holds the cloud-init password in plain text. Write it just before the run and delete it straight after (igor pipes it over SSH with `umask 077` so it never shows up in the process list).
+The scripts expect to run from a working directory on the Proxmox host, with `templates.csv` next to them. No credentials are needed: the templates carry none.
 
 ```bash
 cd /root/templates
-printf '%s' "$CIPASSWORD" > config
 STORAGE=ceph FORCE_REBUILD=false sh ./template-generate.sh
-rm -f config
 ```
 
 | Variable | Default | Effect |
 | -------- | ------- | ------ |
 | `STORAGE` | `ceph` | Proxmox storage the disk is imported into |
 | `FORCE_REBUILD` | `false` | Destroy and rebuild templates that already exist |
+| `BASEDIR` | `/root/templates` | Scratch space for working copies, and the lock file |
 
 By default a run is idempotent. The existence check happens before any download or customisation, so the templates that already exist are skipped and cost nothing, and only the missing ones get built. Set `FORCE_REBUILD=true` when an upstream image has been refreshed.
 
@@ -66,15 +65,30 @@ Before September 2026, Alma used `11100`/`11200` and Oracle used `11700`, `11800
 
 `template-clean.sh` does the same job in bulk. It destroys every Linux template, old numbering included, and leaves Windows alone.
 
+## What a template contains
+
+Every Linux template is built with the same hardware:
+
+- machine type `q35`, with `--cpu cputype=host` (igor overrides the CPU type per VM)
+- SCSI controller `virtio-scsi-single`
+- a virtio RNG device fed from `/dev/urandom`
+- a serial port (`serial0: socket`) and a standard VGA display (`vga: std`), so both the noVNC and xterm.js consoles work
+- the QEMU guest agent enabled, and cloud-init on DHCP with `ciupgrade` off
+
+No credentials are baked in. There is no `ciuser`, `cipassword` or `sshkeys` on the template, so whatever clones it sets the user, key, and password per VM.
+
+SELinux stays enforcing on EL images. Packages are installed with `virt-customize`, so EL images are relabelled (`--selinux-relabel`) to give the new files correct labels at first boot.
+
+EL images get `console=tty0` added to the kernel command line, alongside the `console=ttyS0,115200n8` the upstream images already carry, so the kernel logs to both consoles.
+
 ## What it assumes about the host
 
 These are hardcoded, not configurable. They match the lab it was written for:
 
 - a Ceph cluster, with an RBD pool called `ceph`
 - ISOs and cloud images cached in `/mnt/pve/luggage/template/iso`
-- scratch space in `/root/templates`
+- scratch space in `/root/templates` (or `BASEDIR`)
 - the `vmbr1` bridge and a `Templates` resource pool
-- a cloud-init user of `tgreen`, with the SSH key at `~/.ssh/igor.pub` on the host
 - `virt-customize` installed (from `libguestfs-tools`)
 
 RedHat images have no public URL (the CSV says `NULL`). Download them from the Red Hat portal and drop them into the ISO directory before running. RHEL 10 has a VMID slot but no CSV row. Add one with the filename of the image you download, for example `RedHat,10,NULL,rhel-10.1-x86_64-kvm.qcow2`.

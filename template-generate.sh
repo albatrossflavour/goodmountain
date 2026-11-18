@@ -13,7 +13,7 @@ cleanup_and_exit() {
 	echo ""
 
 	# Clean up any temp files
-	rm -f /root/templates/prod-*.qcow2 2>/dev/null || true
+	rm -f "${BASEDIR}"/prod-*.qcow2 2>/dev/null || true
 
 	exit "$exit_code"
 }
@@ -38,12 +38,11 @@ check_prerequisites() {
 	echo "✓ Prerequisites check passed"
 }
 
-BASEDIR=/root/templates
+BASEDIR=${BASEDIR:-/root/templates} # Scratch space and lock; override to build from a separate directory
 TEMPLATES='./templates.csv'
 ISODIR='/mnt/pve/luggage/template/iso'
 STORAGE=${STORAGE:-ceph}              # Allow override with: STORAGE=local-lvm ./template-generate.sh
 FORCE_REBUILD=${FORCE_REBUILD:-false} # Set FORCE_REBUILD=true to rebuild templates that already exist
-PW=$(cat ./config)
 
 # Run a command quietly, but print the tail of its output if it fails, so the
 # reason a qm step failed is never thrown away.
@@ -324,10 +323,16 @@ process_template() {
 		VIRT_CMD="${VIRT_CMD} --install ${PACKAGES}"
 	fi
 
-	# SELinux configuration. Edit the real file: /etc/sysconfig/selinux is only
-	# a symlink to it on EL8 and isn't shipped from EL9 on.
+	# SELinux stays enforcing. Packages are installed by virt-customize, so the
+	# files it writes need correct labels at first boot.
 	if [ "${VER}" = "10" ] || [ "${VER}" = "9" ] || [ "${VER}" = 8 ] || [ "${VER}" = "Stream" ]; then
-		VIRT_CMD="${VIRT_CMD} --edit /etc/selinux/config:s/^SELINUX=enforcing/SELINUX=disabled/"
+		VIRT_CMD="${VIRT_CMD} --selinux-relabel"
+		# Both consoles: the image only carries console=ttyS0, so the noVNC
+		# console (vga std) would stay blank. grubby replaces a repeated
+		# console= argument, so both are passed together. It fixes the existing
+		# boot entries and the /etc/default/grub edit covers kernels installed later.
+		VIRT_CMD="${VIRT_CMD} --run-command 'grubby --update-kernel=ALL --args=\"console=ttyS0,115200n8 console=tty0\"'"
+		VIRT_CMD="${VIRT_CMD} --edit '/etc/default/grub:s/^(GRUB_CMDLINE_LINUX_DEFAULT=\".*)\"\$/\$1 console=tty0\"/'"
 	fi
 
 	# Machine ID and random seed cleanup (all systems)
@@ -363,7 +368,7 @@ process_template() {
 	fi
 
 	echo "  → Creating VM ${TPROD}..."
-	if ! quiet qm create ${TPROD} --memory 1024 --core 2 --name "${TNAME}" --net0 virtio,bridge=vmbr1 --pool Templates --cpu cputype=host; then
+	if ! quiet qm create ${TPROD} --memory 1024 --core 2 --name "${TNAME}" --net0 virtio,bridge=vmbr1 --pool Templates --cpu cputype=host --machine q35 --rng0 source=/dev/urandom; then
 		echo "  ✗ Failed to create template ${TPROD}"
 		# Check if this is a critical error (VM ID already exists)
 		if qm status ${TPROD} >/dev/null 2>&1; then
@@ -391,7 +396,7 @@ process_template() {
 	fi
 
 	echo "  → Configuring template..."
-	if ! quiet qm set $TPROD --scsihw virtio-scsi-pci --scsi0 "${IMPORTED_DISK}"; then
+	if ! quiet qm set $TPROD --scsihw virtio-scsi-single --scsi0 "${IMPORTED_DISK}"; then
 		echo "  ✗ Could not attach disk to template ${TPROD}"
 		qm destroy ${TPROD} --destroy-unreferenced-disks 1 2>/dev/null
 		rm -f "$TMPISO"
@@ -407,7 +412,7 @@ process_template() {
 		echo "  ✗ Error setting boot"
 		return
 	}
-	quiet qm set $TPROD --serial0 socket --vga serial0 || {
+	quiet qm set $TPROD --serial0 socket --vga std || {
 		echo "  ✗ Error setting serial"
 		return
 	}
@@ -421,18 +426,6 @@ process_template() {
 	}
 	quiet qm set $TPROD --ciupgrade 0 || {
 		echo "  ✗ Error setting ciupgrade"
-		return
-	}
-	quiet qm set $TPROD --ciuser tgreen || {
-		echo "  ✗ Error setting ciuser"
-		return
-	}
-	quiet qm set $TPROD --cipassword "$PW" || {
-		echo "  ✗ Error setting password"
-		return
-	}
-	quiet qm set $TPROD --sshkeys ~/.ssh/igor.pub || {
-		echo "  ✗ Error setting ssh keys"
 		return
 	}
 	quiet qm set $TPROD --ipconfig0 ip=dhcp || {
