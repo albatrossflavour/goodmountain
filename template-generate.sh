@@ -43,6 +43,22 @@ TEMPLATES='./templates.csv'
 ISODIR='/mnt/pve/luggage/template/iso'
 STORAGE=${STORAGE:-ceph}              # Allow override with: STORAGE=local-lvm ./template-generate.sh
 FORCE_REBUILD=${FORCE_REBUILD:-false} # Set FORCE_REBUILD=true to rebuild templates that already exist
+INSTANCE=${INSTANCE:-00}              # EE in KFVEE: 00 is the primary template, 01 to 99 build a parallel copy beside it
+NAME_SUFFIX=${NAME_SUFFIX:-}          # Appended to the template name, for example -v2. Required when INSTANCE is not 00
+
+case "$INSTANCE" in
+[0-9][0-9]) ;;
+*)
+	echo "INSTANCE must be two digits, 00 to 99 (got '${INSTANCE}')" >&2
+	exit 1
+	;;
+esac
+if [ "$INSTANCE" != "00" ] && [ -z "$NAME_SUFFIX" ]; then
+	echo "INSTANCE=${INSTANCE} needs NAME_SUFFIX (for example -v2): two templates must never share a name" >&2
+	exit 1
+fi
+# Decimal value of INSTANCE (08 and 09 are not valid octal in shell arithmetic)
+INSTANCE_NUM=$(echo "$INSTANCE" | sed 's/^0*//; s/^$/0/')
 
 # Run a command quietly, but print the tail of its output if it fails, so the
 # reason a qm step failed is never thrown away.
@@ -253,8 +269,8 @@ process_template() {
 
 	# Calculate template ID
 	BASE_ID=$(calculate_base_id "$NAME" "$VER")
-	TPROD=$((BASE_ID * 10))
-	TNAME="template-${NAME}-${VER}"
+	TPROD=$((BASE_ID * 10 + INSTANCE_NUM))
+	TNAME="template-${NAME}-${VER}${NAME_SUFFIX}"
 
 	# Consumers clone by name, so two templates with the same name make every
 	# clone ambiguous. If this name already exists under a different VMID (left
@@ -341,6 +357,13 @@ process_template() {
 
 	# Additional cleanup for Debian-based systems
 	if [ "${NAME}" = "Debian" ] || [ "${NAME}" = "Ubuntu" ]; then
+		# Both consoles, as for EL: console=tty0 for noVNC and ttyS0 for the
+		# serial console (last console= wins /dev/console). Ubuntu sets
+		# console=tty1 in grub.d and Debian sets its own in GRUB_CMDLINE_LINUX,
+		# so strip whatever console= is there and add the pair, then rebuild
+		# grub.cfg so the change is in the boot menu and not only the defaults.
+		VIRT_CMD="${VIRT_CMD} --run-command 'sed -i -E \"/^GRUB_CMDLINE_LINUX(_DEFAULT)?=.*console=/ { s/ ?console=(tty[0-9]+|ttyS0(,[0-9a-z]+)?)//g; s/\\\"[[:space:]]*\$/ console=tty0 console=ttyS0,115200n8\\\"/; s/=\\\" /=\\\"/ }\" /etc/default/grub /etc/default/grub.d/*.cfg'"
+		VIRT_CMD="${VIRT_CMD} --run-command 'update-grub'"
 		VIRT_CMD="${VIRT_CMD} --run-command 'rm -f /var/lib/systemd/random-seed /var/lib/urandom/random-seed'"
 	fi
 
@@ -360,6 +383,12 @@ process_template() {
 	# when the template did not exist, or when FORCE_REBUILD=true, so this is the
 	# forced-refresh path (the early skip above handles the default warm case).
 	if qm status ${TPROD} >/dev/null 2>&1; then
+		# Only ever destroy a VM that carries the name this run would give it.
+		EXISTING_NAME=$(qm config ${TPROD} 2>/dev/null | awk '/^name:/ {print $2}')
+		if [ "$EXISTING_NAME" != "$TNAME" ]; then
+			echo "  ✗ VMID ${TPROD} is '${EXISTING_NAME}', not ${TNAME}: refusing to destroy it"
+			return
+		fi
 		echo "  → Destroying existing template ${TPROD} (force rebuild)..."
 		quiet qm destroy ${TPROD} --destroy-unreferenced-disks 1 || {
 			echo "  ✗ Could not destroy template ${TPROD}, it may be in use"

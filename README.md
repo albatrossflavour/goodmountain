@@ -34,6 +34,8 @@ STORAGE=ceph FORCE_REBUILD=false sh ./template-generate.sh
 | `STORAGE` | `ceph` | Proxmox storage the disk is imported into |
 | `FORCE_REBUILD` | `false` | Destroy and rebuild templates that already exist |
 | `BASEDIR` | `/root/templates` | Scratch space for working copies, and the lock file |
+| `INSTANCE` | `00` | The `EE` in the VMID. A non-zero value builds a parallel copy beside the `00` template, and needs `NAME_SUFFIX` |
+| `NAME_SUFFIX` | empty | Appended to the template name, for example `-v2` gives `template-Ubuntu-2404-v2` |
 
 By default a run is idempotent. The existence check happens before any download or customisation, so the templates that already exist are skipped and cost nothing, and only the missing ones get built. Set `FORCE_REBUILD=true` when an upstream image has been refreshed.
 
@@ -49,7 +51,7 @@ The base ID uses a `KFVE` scheme:
 - `K` is the kernel (`1` for Linux, `2` for Windows)
 - `F` is the family (Red Hat `1`, Debian `2`, SUSE `3`, Arch `4`, Amazon `5`, Fedora `6`, Alma `7`, Oracle `8`, RHEL and Rocky 10 onwards `9`)
 - `V` is the version slot within the family
-- `E` is the instance, which is always `0` today
+- `E` is the instance, `0` by default (the full VMID is `KFVEE`, so the `EE` pair runs `00` to `99`). Set `INSTANCE=01` and `NAME_SUFFIX=-v2` to build a second copy, for example Ubuntu 24.04 as `12501` named `template-Ubuntu-2404-v2`. Force rebuild only destroys the VMID it is building, and only when that VM already carries the same name, so it cannot reach the `00` template
 
 Alma and Oracle are Red Hat rebuilds, but family 1 has all nine version slots taken, so each gets a family of its own. RHEL and Rocky keep their 8 and 9 slots in family 1, and their 10 releases continue in family 9 (`19100` and `19200`). `1990` remains the fallback for unknown Linux. The mapping lives in `calculate_base_id()` in `template-generate.sh`.
 
@@ -79,7 +81,7 @@ No credentials are baked in. There is no `ciuser`, `cipassword` or `sshkeys` on 
 
 SELinux stays enforcing on EL images. Packages are installed with `virt-customize`, so EL images are relabelled (`--selinux-relabel`) to give the new files correct labels at first boot.
 
-EL images get `console=tty0` added to the kernel command line, alongside the `console=ttyS0,115200n8` the upstream images already carry, so the kernel logs to both consoles.
+EL images get `console=tty0` added to the kernel command line, alongside the `console=ttyS0,115200n8` the upstream images already carry, so the kernel logs to both consoles. Debian and Ubuntu images are set to the same `console=tty0 console=ttyS0,115200n8` pair (Ubuntu ships `console=tty1 console=ttyS0`, Debian ships `ttyS0,115200` without the parity), and `update-grub` regenerates `grub.cfg`.
 
 ## What it assumes about the host
 
