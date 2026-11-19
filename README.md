@@ -37,7 +37,9 @@ STORAGE=ceph FORCE_REBUILD=false sh ./template-generate.sh
 | `INSTANCE` | `00` | The `EE` in the VMID. A non-zero value builds a parallel copy beside the `00` template, and needs `NAME_SUFFIX` |
 | `NAME_SUFFIX` | empty | Appended to the template name, for example `-v2` gives `template-Ubuntu-2404-v2` |
 
-By default a run is idempotent. The existence check happens before any download or customisation, so the templates that already exist are skipped and cost nothing, and only the missing ones get built. Set `FORCE_REBUILD=true` when an upstream image has been refreshed.
+By default a run is idempotent. The existence check happens before any download or customisation, so the templates that already exist are skipped and cost nothing, and only the missing ones get built. Set `FORCE_REBUILD=true` to rebuild existing templates with current packages.
+
+Every build checks upstream before it uses a cached image. The cache keeps upstream's timestamp on each file, and a newer upstream image replaces it, so a `latest` or `current` URL doesn't pin the template to whatever was downloaded first. A pinned URL (Oracle, Amazon Linux) only moves when its CSV row does. If upstream can't be reached the build of that template stops.
 
 ## The contract with anything that clones these
 
@@ -75,6 +77,7 @@ Every Linux template is built with the same hardware:
 - SCSI controller `virtio-scsi-single`
 - a virtio RNG device fed from `/dev/urandom`
 - a serial port (`serial0: socket`) and a standard VGA display (`vga: std`), so both the noVNC and xterm.js consoles work
+- every package updated at build time, except RedHat, which has no repositories without a subscription. Most images use `virt-customize --update`. Debian and Ubuntu get `apt-get full-upgrade` so a new kernel isn't held back, Amazon Linux calls yum directly because virt-customize doesn't recognise it, and Arch builds a throwaway pacman keyring and runs without pacman's sandbox, which the libguestfs appliance can't provide
 - the QEMU guest agent enabled, and cloud-init on DHCP with `ciupgrade` off
 
 No credentials are baked in. There is no `ciuser`, `cipassword` or `sshkeys` on the template, so whatever clones it sets the user, key, and password per VM.

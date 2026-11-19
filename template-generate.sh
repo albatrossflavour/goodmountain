@@ -309,17 +309,35 @@ process_template() {
 		return
 	fi
 
-	if [ ! -f "${ISODIR}/${ISO}" ]; then
-		echo "  → Downloading ${ISO}..."
-		# Download to a .part file and only rename it into place once complete.
-		# The cache is keyed on the file existing, so a partial file left by an
-		# interrupted or overlapping download would otherwise be reused forever.
-		if ! quiet wget -q "${URL}${ISO}" -O "${ISODIR}/${ISO}.part"; then
-			echo "  ✗ Download failed"
-			rm -f "${ISODIR}/${ISO}.part"
-			return
+	# Fetch the image, or refresh the cached copy when upstream has a newer one.
+	# Most upstream names (latest, current) never change, so a cache keyed on
+	# the file existing would build from the same old image forever. curl -R
+	# keeps upstream's timestamp on the file and -z only downloads when
+	# upstream is newer than it. Download to a .part file and only rename it
+	# into place once complete, so a partial download is never used. NULL means
+	# no public URL (RedHat): the image must already be in the cache.
+	if [ "${URL}" != "NULL" ]; then
+		echo "  → Checking ${ISO} upstream..."
+		rm -f "${ISODIR}/${ISO}.part"
+		if [ -f "${ISODIR}/${ISO}" ]; then
+			set -- -z "${ISODIR}/${ISO}"
+		else
+			set --
 		fi
-		mv "${ISODIR}/${ISO}.part" "${ISODIR}/${ISO}"
+		if ! quiet curl -fsSL -R "$@" -o "${ISODIR}/${ISO}.part" "${URL}${ISO}"; then
+			rm -f "${ISODIR}/${ISO}.part"
+			echo "  ✗ Download failed"
+			return
+		elif [ -s "${ISODIR}/${ISO}.part" ]; then
+			mv "${ISODIR}/${ISO}.part" "${ISODIR}/${ISO}"
+			echo "  → Downloaded a newer ${ISO}"
+		else
+			rm -f "${ISODIR}/${ISO}.part"
+		fi
+	fi
+	if [ ! -f "${ISODIR}/${ISO}" ]; then
+		echo "  ✗ ${ISO} is not in ${ISODIR}"
+		return
 	fi
 
 	TMPISO="${BASEDIR}/prod-${ISO}"
@@ -330,14 +348,35 @@ process_template() {
 	# Build virt-customize command with batched operations
 	VIRT_CMD="virt-customize -a $TMPISO"
 
-	# Package installation (skip for RedHat due to subscription requirements)
-	if [ "${NAME}" != "RedHat" ]; then
+	# Patch the image up to date and add the packages every template needs,
+	# so a clone doesn't boot hundreds of updates behind. RedHat is skipped:
+	# it has no repositories without a subscription.
+	case "${NAME}" in
+	RedHat) ;;
+	Debian | Ubuntu)
+		# A full-upgrade, because virt-customize --update only runs apt-get
+		# upgrade, which holds back a new kernel.
 		PACKAGES="qemu-guest-agent,unzip"
-		if [ "${NAME}" = "Debian" ]; then
-			PACKAGES="${PACKAGES},gnupg"
-		fi
+		[ "${NAME}" = "Debian" ] && PACKAGES="${PACKAGES},gnupg"
+		VIRT_CMD="${VIRT_CMD} --run-command 'export DEBIAN_FRONTEND=noninteractive; apt-get -q -y update && apt-get -q -y -o Dpkg::Options::=--force-confnew full-upgrade && apt-get -q -y autoremove --purge && apt-get -q -y clean'"
 		VIRT_CMD="${VIRT_CMD} --install ${PACKAGES}"
-	fi
+		;;
+	Arch)
+		# The image has no keyring (pacman-init.service makes one at first
+		# boot), and pacman's sandbox needs Landlock, which the libguestfs
+		# appliance kernel lacks. Build a throwaway keyring, run pacman without
+		# the sandbox, and remove the keyring so each clone generates its own.
+		VIRT_CMD="${VIRT_CMD} --run-command 'pacman-key --init && pacman-key --populate archlinux && pacman --disable-sandbox -Syu --noconfirm qemu-guest-agent unzip && pacman --disable-sandbox -Scc --noconfirm; rc=\$?; rm -rf /etc/pacman.d/gnupg; exit \$rc'"
+		;;
+	AmazonLinux)
+		# virt-customize doesn't recognise Amazon Linux, so its --update and
+		# --install can't find a package manager. Call yum directly.
+		VIRT_CMD="${VIRT_CMD} --run-command 'yum -y -q update && yum -y -q install qemu-guest-agent unzip && yum clean all'"
+		;;
+	*)
+		VIRT_CMD="${VIRT_CMD} --update --install qemu-guest-agent,unzip"
+		;;
+	esac
 
 	# SELinux stays enforcing. Packages are installed by virt-customize, so the
 	# files it writes need correct labels at first boot.
@@ -352,7 +391,9 @@ process_template() {
 	fi
 
 	# Machine ID and random seed cleanup (all systems)
-	VIRT_CMD="${VIRT_CMD} --truncate /etc/machine-id"
+	# Empty, not removed, so systemd makes a new one at first boot. Some
+	# images (Arch) ship without the file, and then there's nothing to empty.
+	VIRT_CMD="${VIRT_CMD} --run-command 'if [ -e /etc/machine-id ]; then : >/etc/machine-id; fi'"
 	VIRT_CMD="${VIRT_CMD} --run-command 'rm -f /var/lib/dbus/machine-id'"
 
 	# Additional cleanup for Debian-based systems

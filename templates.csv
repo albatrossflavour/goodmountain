@@ -1,8 +1,8 @@
 #Name,Version,URL,ISO
 RedHat,8,NULL,rhel-8.10-x86_64-kvm.qcow2
 RedHat,9,NULL,rhel-9.4-x86_64-kvm.qcow2
-Oracle,8,https://yum.oracle.com/templates/OracleLinux/OL8/u10/x86_64/,OL8U10_x86_64-kvm-b237.qcow2
-Oracle,9,https://yum.oracle.com/templates/OracleLinux/OL9/u4/x86_64/,OL9U4_x86_64-kvm-b234.qcow2
+Oracle,8,https://yum.oracle.com/templates/OracleLinux/OL8/u10/x86_64/,OL8U10_x86_64-kvm-b287.qcow2
+Oracle,9,https://yum.oracle.com/templates/OracleLinux/OL9/u8/x86_64/,OL9U8_x86_64-kvm-b293.qcow2
 Oracle,10,https://yum.oracle.com/templates/OracleLinux/OL10/u1/x86_64/,OL10U1_x86_64-kvm-b291.qcow2
 Rocky,8,DYNAMIC,DYNAMIC
 Rocky,9,DYNAMIC,DYNAMIC
@@ -14,5 +14,5 @@ Debian,12,https://cdimage.debian.org/images/cloud/bookworm/latest/,debian-12-gen
 Ubuntu,2204,DYNAMIC,DYNAMIC
 Ubuntu,2404,DYNAMIC,DYNAMIC
 Arch,1,https://geo.mirror.pkgbuild.com/images/latest/,Arch-Linux-x86_64-cloudimg.qcow2
-AmazonLinux,2,https://cdn.amazonlinux.com/os-images/2.0.20250113.0/kvm/,amzn2-kvm-2.0.20250113.0-x86_64.xfs.gpt.qcow2
+AmazonLinux,2,https://cdn.amazonlinux.com/os-images/2.0.20261118.0/kvm/,amzn2-kvm-2.0.20261118.0-x86_64.xfs.gpt.qcow2
 Windows,2022,NULL,
