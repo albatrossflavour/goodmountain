@@ -1,9 +1,12 @@
-#Name,Version,URL,ISO
+#Name,Version,URL,ISO,SHA256
+# SHA256 pins an image whose distro publishes no signed checksums (Oracle on
+# its templates page, RedHat on the customer portal). Leave it empty where the
+# distro signs its checksums: those are fetched and verified at build time.
 RedHat,8,NULL,rhel-8.10-x86_64-kvm.qcow2
 RedHat,9,NULL,rhel-9.4-x86_64-kvm.qcow2
-Oracle,8,https://yum.oracle.com/templates/OracleLinux/OL8/u10/x86_64/,OL8U10_x86_64-kvm-b287.qcow2
-Oracle,9,https://yum.oracle.com/templates/OracleLinux/OL9/u8/x86_64/,OL9U8_x86_64-kvm-b293.qcow2
-Oracle,10,https://yum.oracle.com/templates/OracleLinux/OL10/u1/x86_64/,OL10U1_x86_64-kvm-b291.qcow2
+Oracle,8,https://yum.oracle.com/templates/OracleLinux/OL8/u10/x86_64/,OL8U10_x86_64-kvm-b287.qcow2,cf9eb243b7390311f1e2896e3e6849241e521e6592c8be9907956e3a6cee1f0c
+Oracle,9,https://yum.oracle.com/templates/OracleLinux/OL9/u8/x86_64/,OL9U8_x86_64-kvm-b293.qcow2,b12103391327abee8090686759c0d62dac9a7af2bf0f45fdf6b0d085a0fbb52b
+Oracle,10,https://yum.oracle.com/templates/OracleLinux/OL10/u1/x86_64/,OL10U1_x86_64-kvm-b291.qcow2,8e59326c4bf7cfa58a6cac404db8ed583fe3a5f4c460e2b73c64988785bb4f0f
 Rocky,8,DYNAMIC,DYNAMIC
 Rocky,9,DYNAMIC,DYNAMIC
 Rocky,10,DYNAMIC,DYNAMIC

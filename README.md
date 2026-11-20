@@ -18,11 +18,13 @@ The script started life in `proxform`, moved into igor as `scripts/template-gene
 | ---- | ------- |
 | `template-generate.sh` | Builds every template in `templates.csv` that doesn't already exist |
 | `template-clean.sh` | Destroys every Linux template (VMID below `20000`, name starting `template-`) so they can be rebuilt from scratch. Windows templates are left alone |
-| `templates.csv` | The list of templates to build: `Name,Version,URL,ISO` |
+| `templates.csv` | The list of templates to build: `Name,Version,URL,ISO,SHA256` |
+| `keys/` | The distro signing keys, pinned by fingerprint in `keys/fingerprints` |
+| `spec/` | rspec tests. They run the generator against fake `qm`, `curl` and friends, so nothing touches a host or the network |
 
 ## Running it
 
-The scripts expect to run from a working directory on the Proxmox host, with `templates.csv` next to them. No credentials are needed: the templates carry none.
+The scripts expect to run from a working directory on the Proxmox host, with `templates.csv` and `keys/` next to them. No credentials are needed: the templates carry none.
 
 ```bash
 cd /root/templates
@@ -36,10 +38,41 @@ STORAGE=ceph FORCE_REBUILD=false sh ./template-generate.sh
 | `BASEDIR` | `/root/templates` | Scratch space for working copies, and the lock file |
 | `INSTANCE` | `00` | The `EE` in the VMID. A non-zero value builds a parallel copy beside the `00` template, and needs `NAME_SUFFIX` |
 | `NAME_SUFFIX` | empty | Appended to the template name, for example `-v2` gives `template-Ubuntu-2404-v2` |
+| `TARGETS` | empty | Build only these, each at its own VMID, for example `ubuntu-2404=12501 rocky-9=11800`. A non-zero instance `n` is named `-v<n+1>`, so `12501` is `template-Ubuntu-2404-v2`. Can't be combined with `INSTANCE` or `NAME_SUFFIX` |
+| `ISODIR` | `/mnt/pve/luggage/template/iso` | The image cache |
+| `KEYDIR` | `./keys` | The pinned signing keys |
 
 By default a run is idempotent. The existence check happens before any download or customisation, so the templates that already exist are skipped and cost nothing, and only the missing ones get built. Set `FORCE_REBUILD=true` to rebuild existing templates with current packages.
 
+igor runs it with `TARGETS` set to the VMIDs in its node map, so `./igor templates` builds exactly the templates the map clones and nothing beside them.
+
+A run exits non-zero if any template failed, after trying the rest. A row with no image (Windows) is skipped, not failed.
+
 Every build checks upstream before it uses a cached image. The cache keeps upstream's timestamp on each file, and a newer upstream image replaces it, so a `latest` or `current` URL doesn't pin the template to whatever was downloaded first. A pinned URL (Oracle, Amazon Linux) only moves when its CSV row does. If upstream can't be reached the build of that template stops.
+
+## Image verification
+
+No image is used until it matches a checksum the build can trust. Before downloading, the build fetches the distro's checksum file and checks its signature against the distro key pinned in `keys/fingerprints`. A newer download is checked before it goes into the cache, and the private working copy in `BASEDIR` is checked again before it's customised, because the cache is a shared NFS export and its copy could be swapped after the check. Any mismatch, bad signature, unpinned signer, or missing checksum fails that template with a `✗` and the image isn't used.
+
+| Distro | Checked against | Signed by |
+| ------ | --------------- | --------- |
+| Rocky 9, 10 | `CHECKSUM` | `CHECKSUM.asc`, Rocky release key |
+| Rocky 8 | `CHECKSUM` | not signed upstream, HTTPS only |
+| Alma 8, 9, 10 | `CHECKSUM` | `CHECKSUM.asc`, AlmaLinux OS key |
+| Ubuntu | `SHA256SUMS` | `SHA256SUMS.gpg`, UEC Image Automatic Signing Key |
+| Debian | `SHA512SUMS` | not signed upstream, HTTPS only |
+| Arch | `<image>.SHA256` | `<image>.sig` over the image itself, arch-boxes key |
+| Amazon Linux 2 | `SHA256SUMS` | RSA signature, checked with `openssl` against the pinned PEM |
+| Oracle | SHA256 pinned in `templates.csv`, from Oracle's templates page | no signed checksums upstream |
+| RedHat | SHA256 pinned in `templates.csv`, from the customer portal | no public checksums |
+
+A distro not in the table needs a SHA256 in `templates.csv`, or the build refuses it. A key file only counts if it is the fingerprint pinned beside it, and a signature only counts if its primary key is that fingerprint. `keys/fingerprints` records where each fingerprint was cross-checked. To rotate a key, replace the file and its fingerprint in the same commit, after checking the new fingerprint against the distro's published one. The spec checks every key file against its pin.
+
+Nothing maintained already does this across these distros. Packer checks a checksum file but not its signature, `virt-builder` only verifies its own index, and `uvtool` and simplestreams cover Ubuntu alone. So it uses `gpgv`, `openssl` and `sha256sum`, which are on every Proxmox host.
+
+## The image cache's permissions
+
+The cache is the `luggage` NFS storage, a Synology export (`192.168.1.22:/volume1/proximages`, NFSv4.0, `sec=sys`). Everything on the share is `0777` unless it was given a mode explicitly: images curl wrote with a `0022` umask are `0777`, as is every directory, including the ones Proxmox made, while files Proxmox's upload put there (it copies a `0644` file with `cp`, which sets the mode) are `0644`. That points at the share's ACLs on the NAS, not at Proxmox or the mount, which has no mode options. So the generator `chmod 0644`s each image before moving it into place. The directories are the share's setting and the generator leaves them alone.
 
 ## The contract with anything that clones these
 
@@ -100,3 +133,11 @@ RedHat images have no public URL (the CSV says `NULL`). Download them from the R
 
 EL10 (RHEL, Rocky, Alma and Oracle 10) needs an x86-64-v3 CPU, which means AVX2. All three nodes in the current cluster support it. The templates use `cputype=host`, so clones get the real CPU flags. AlmaLinux also publishes an `x86_64_v2` build for older hardware, which the CSV doesn't use.
 
+## Tests
+
+```bash
+rspec spec
+shellcheck template-generate.sh template-clean.sh
+```
+
+The spec makes throwaway signing keys, signs fixture checksum files with them, and runs the generator against fake `qm`, `virt-customize`, `ceph`, `rbd` and `curl`. `gpg`, `gpgv`, `openssl` and the checksum tools are real.

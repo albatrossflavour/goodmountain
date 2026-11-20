@@ -1,0 +1,20 @@
+# The distro signing keys goodmountain trusts, pinned by fingerprint. Each
+# name has a key file beside this one: <name>.asc (OpenPGP, pinned by its
+# primary key fingerprint) or <name>.pem (Amazon's RSA key, pinned by the
+# SHA256 of its DER public key). A signature only counts when it verifies
+# against the key file and the key file is the fingerprint pinned here.
+#
+# Cross-checked 2026-11-20 against a second source where one exists:
+#   rocky-9, rocky-10  rockylinux.org/keys
+#   alma-8/9/10        almalinux.org/security (alma-8 is "AlmaLinux OS 8 #2")
+#   ubuntu-cloud-images  Ubuntu's ubuntu-cloudimage-keyring package
+#   arch-boxes         the arch-boxes README and keyserver.ubuntu.com
+#   amazon-linux-2     cdn.amazonlinux.com only: no second source found
+rocky-9 21CB256AE16FC54C6E652949702D426D350D275D
+rocky-10 FC226859C0860BF0DDB95B085B106C736FEDFC85
+alma-8 BC5EDDCADF502C077F1582882AE81E8ACED7258B
+alma-9 BF18AC2876178908D6E71267D36CB86CB86B3716
+alma-10 EE6DB7B98F5BF5EDD9DA0DE5DEE5C11CC2A1E572
+ubuntu-cloud-images D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81
+arch-boxes 1B9A16984A4E8CB448712D2AE0B78BF4326C6F8F
+amazon-linux-2 d1b6e2aca73e1fb24ce58c3cda268aa4f1d61d7174634a83a1647363d79621ea

@@ -40,11 +40,18 @@ check_prerequisites() {
 
 BASEDIR=${BASEDIR:-/root/templates} # Scratch space and lock; override to build from a separate directory
 TEMPLATES='./templates.csv'
-ISODIR='/mnt/pve/luggage/template/iso'
+ISODIR=${ISODIR:-/mnt/pve/luggage/template/iso} # The image cache, shared between the Proxmox nodes
+KEYDIR=${KEYDIR:-./keys}                        # The pinned distro signing keys (keys/fingerprints)
 STORAGE=${STORAGE:-ceph}              # Allow override with: STORAGE=local-lvm ./template-generate.sh
 FORCE_REBUILD=${FORCE_REBUILD:-false} # Set FORCE_REBUILD=true to rebuild templates that already exist
 INSTANCE=${INSTANCE:-00}              # EE in KFVEE: 00 is the primary template, 01 to 99 build a parallel copy beside it
 NAME_SUFFIX=${NAME_SUFFIX:-}          # Appended to the template name, for example -v2. Required when INSTANCE is not 00
+TARGETS=${TARGETS:-}                  # Build only these, each at its own VMID: "ubuntu-2404=12501 rocky-9=11800"
+
+if [ -n "$TARGETS" ] && { [ -n "${INSTANCE#00}" ] || [ -n "$NAME_SUFFIX" ]; }; then
+	echo "TARGETS gives each template its own VMID, so it can't be combined with INSTANCE or NAME_SUFFIX" >&2
+	exit 1
+fi
 
 case "$INSTANCE" in
 [0-9][0-9]) ;;
@@ -250,6 +257,163 @@ get_dynamic_url() {
 	return 1
 }
 
+# Image verification
+#
+# Every image is checked against a checksum before it's used, and the checksum
+# is only trusted when it's signed by a distro key pinned in keys/fingerprints,
+# or pinned in templates.csv. A mismatch fails that template loudly and the
+# image is never used.
+
+# How a distro publishes checksums for an image, as
+# "ALGO SUMS_URL SIG_URL SIGNED KEY": SIGNED says what the signature covers
+# (sums, or the image itself), and "-" means upstream publishes none. Names
+# not listed publish nothing usable, so they need a SHA256 in templates.csv.
+verification_for() {
+	name="$1"
+	version="$2"
+	url="$3"
+	iso="$4"
+	case "$name" in
+	Rocky)
+		case "$version" in
+		8) echo "sha256 ${url}CHECKSUM - - -" ;; # Rocky 8 doesn't sign its image checksums
+		*) echo "sha256 ${url}CHECKSUM ${url}CHECKSUM.asc sums rocky-${version}" ;;
+		esac
+		;;
+	Alma) echo "sha256 ${url}CHECKSUM ${url}CHECKSUM.asc sums alma-${version}" ;;
+	Ubuntu) echo "sha256 ${url}SHA256SUMS ${url}SHA256SUMS.gpg sums ubuntu-cloud-images" ;;
+	Debian) echo "sha512 ${url}SHA512SUMS - - -" ;; # Debian doesn't sign its cloud image checksums
+	Arch) echo "sha256 ${url}${iso}.SHA256 ${url}${iso}.sig image arch-boxes" ;;
+	AmazonLinux) echo "sha256 ${url}SHA256SUMS ${url}SHA256SUMS.RSASSA_PKCS1_V1_5_SHA_256 sums amazon-linux-2" ;;
+	*) echo "sha256 - - - -" ;;
+	esac
+}
+
+lower() {
+	tr '[:upper:]' '[:lower:]'
+}
+
+# Check SIG over DATA with the key pinned as KEY, using WORK for scratch.
+# OpenPGP keys must make a VALIDSIG whose primary key is the pinned
+# fingerprint; Amazon's RSA key must have the pinned DER SHA256.
+verify_signature() {
+	key="$1"
+	sig="$2"
+	data="$3"
+	work="$4"
+	pinned=$(awk -v k="$key" '$1 == k {print $2; exit}' "${KEYDIR}/fingerprints" 2>/dev/null | lower)
+	if [ -z "$pinned" ]; then
+		echo "  ✗ No pinned fingerprint for key '${key}' in ${KEYDIR}/fingerprints"
+		return 1
+	fi
+	if [ -f "${KEYDIR}/${key}.pem" ]; then
+		have=$(openssl pkey -pubin -in "${KEYDIR}/${key}.pem" -outform DER 2>/dev/null | sha256sum | awk '{print $1}')
+		if [ "$have" != "$pinned" ]; then
+			echo "  ✗ ${KEYDIR}/${key}.pem is not the pinned key (${pinned})"
+			return 1
+		fi
+		if ! openssl dgst -sha256 -verify "${KEYDIR}/${key}.pem" -signature "$sig" "$data" >/dev/null 2>&1; then
+			echo "  ✗ Bad signature on $(basename "$data"): not signed by the pinned ${key} key"
+			return 1
+		fi
+		return 0
+	fi
+	if ! gpg --batch --quiet --dearmor <"${KEYDIR}/${key}.asc" >"${work}/${key}.gpg" 2>/dev/null; then
+		echo "  ✗ Could not read ${KEYDIR}/${key}.asc"
+		return 1
+	fi
+	if ! status=$(gpgv --status-fd 1 --keyring "${work}/${key}.gpg" "$sig" "$data" 2>/dev/null); then
+		echo "  ✗ Bad signature on $(basename "$data"): not signed by the ${key} key"
+		return 1
+	fi
+	if ! printf '%s\n' "$status" | awk '$2 == "VALIDSIG" {print $NF}' | lower | grep -qx "$pinned"; then
+		echo "  ✗ $(basename "$data") is signed, but not by the pinned ${key} key (${pinned})"
+		return 1
+	fi
+}
+
+# The one checksum SUMS lists for ISO, in GNU (hash  name, hash *name) or BSD
+# (SHA256 (name) = hash) format.
+sum_for() {
+	sums="$1"
+	iso="$2"
+	algo=$(echo "$3" | tr '[:lower:]' '[:upper:]')
+	awk -v f="$iso" -v a="$algo" '
+		NF == 2 && ($2 == f || $2 == "*" f) { print $1 }
+		NF == 4 && $1 == a && $2 == "(" f ")" && $3 == "=" { print $4 }
+	' "$sums" | lower | sort -u
+}
+
+# Fetch and check what ISO should hash to, setting SUM_ALGO, EXPECTED_SUM,
+# SIGNED, and SIGN_KEY. PINNED is the SHA256 from templates.csv, if any. Runs
+# before the image is downloaded, so a bad checksum file costs nothing.
+expected_sum() {
+	name="$1"
+	version="$2"
+	url="$3"
+	iso="$4"
+	pinned_sum=$(echo "$5" | lower)
+	work="$6"
+	read -r SUM_ALGO sums_url sig_url SIGNED SIGN_KEY <<-SPEC
+		$(verification_for "$name" "$version" "$url" "$iso")
+	SPEC
+	EXPECTED_SUM=""
+	if [ "$url" != "NULL" ] && [ "$sums_url" != "-" ]; then
+		if ! quiet curl -fsSL -o "${work}/sums" "$sums_url"; then
+			echo "  ✗ Could not fetch the checksums at ${sums_url}"
+			return 1
+		fi
+		if [ "$sig_url" = "-" ]; then
+			echo "  ! ${name} ${version} doesn't sign its checksums: checking against ${sums_url} over HTTPS only"
+		elif ! quiet curl -fsSL -o "${work}/sig" "$sig_url"; then
+			echo "  ✗ Could not fetch the signature at ${sig_url}"
+			return 1
+		elif [ "$SIGNED" = "sums" ]; then
+			verify_signature "$SIGN_KEY" "${work}/sig" "${work}/sums" "$work" || return 1
+		fi
+		EXPECTED_SUM=$(sum_for "${work}/sums" "$iso" "$SUM_ALGO")
+		case "$(printf '%s\n' "$EXPECTED_SUM" | grep -c .)" in
+		1) ;;
+		0)
+			echo "  ✗ ${sums_url} lists no checksum for ${iso}"
+			return 1
+			;;
+		*)
+			echo "  ✗ ${sums_url} lists more than one checksum for ${iso}"
+			return 1
+			;;
+		esac
+	fi
+	if [ -n "$pinned_sum" ]; then
+		if [ -n "$EXPECTED_SUM" ] && [ "$EXPECTED_SUM" != "$pinned_sum" ]; then
+			echo "  ✗ The SHA256 pinned in templates.csv for ${iso} isn't the one upstream publishes"
+			return 1
+		fi
+		SUM_ALGO=sha256
+		EXPECTED_SUM="$pinned_sum"
+	fi
+	if [ -z "$EXPECTED_SUM" ]; then
+		echo "  ✗ Nothing to check ${iso} against: upstream publishes no checksum, so pin its SHA256 in templates.csv"
+		return 1
+	fi
+}
+
+# Check FILE against what expected_sum found, and against the signature when
+# upstream signs the image itself (Arch).
+check_image() {
+	file="$1"
+	work="$2"
+	have=$("${SUM_ALGO}sum" "$file" | awk '{print $1}')
+	if [ "$have" != "$EXPECTED_SUM" ]; then
+		echo "  ✗ CHECKSUM MISMATCH for $(basename "$file"): ${SUM_ALGO} is ${have}, upstream says ${EXPECTED_SUM}. Not using it."
+		return 1
+	fi
+	if [ "$SIGNED" = "image" ]; then
+		verify_signature "$SIGN_KEY" "${work}/sig" "$file" "$work" || return 1
+	fi
+	return 0
+}
+
 if [ ! -f "${TEMPLATES}" ]; then
 	echo "Couldn't find ${TEMPLATES} : exiting" >&2
 	exit 1
@@ -260,17 +424,21 @@ if [ ! -d "${ISODIR}" ]; then
 	exit 1
 fi
 
-# Function to process a single template
+# Build one template. LINE is its templates.csv row, INST its instance (the
+# EE in KFVEE) and SUFFIX what goes on the end of its name. Returns 1 when the
+# template fails, so the run can say so.
 process_template() {
 	LINE="$1"
+	INST="$2"
+	SUFFIX="$3"
 	NAME=$(echo "$LINE" | awk -F, '{print $1}')
 	LCNAME=$(echo "$NAME" | tr "[:upper:]" "[:lower:]")
 	VER=$(echo "$LINE" | awk -F, '{print $2}')
 
 	# Calculate template ID
 	BASE_ID=$(calculate_base_id "$NAME" "$VER")
-	TPROD=$((BASE_ID * 10 + INSTANCE_NUM))
-	TNAME="template-${NAME}-${VER}${NAME_SUFFIX}"
+	TPROD=$((BASE_ID * 10 + INST))
+	TNAME="template-${NAME}-${VER}${SUFFIX}"
 
 	# Consumers clone by name, so two templates with the same name make every
 	# clone ambiguous. If this name already exists under a different VMID (left
@@ -282,7 +450,7 @@ process_template() {
 	if [ -n "$OTHER_IDS" ]; then
 		echo "  ✗ ${TNAME} already exists as VMID ${OTHER_IDS}but belongs at ${TPROD} - skipping"
 		echo "     Destroy the old one (after moving any linked clones off it), then rerun"
-		return
+		return 1
 	fi
 
 	# Skip templates that already exist unless a rebuild is explicitly forced.
@@ -295,27 +463,41 @@ process_template() {
 		return
 	fi
 
-	# CSV parsing (Name,Version,URL,ISO)
+	# CSV parsing (Name,Version,URL,ISO,SHA256)
 	CSV_URL=$(echo "$LINE" | awk -F, '{print $3}')
 	CSV_ISO=$(echo "$LINE" | awk -F, '{print $4}')
+	CSV_SHA256=$(echo "$LINE" | awk -F, '{print $5}')
 
 	# Get dynamic URL or fallback to CSV
 	DYNAMIC_RESULT=$(get_dynamic_url "$NAME" "$VER" "$CSV_URL" "$CSV_ISO")
 	URL=$(echo "$DYNAMIC_RESULT" | head -n1)
-	ISO=$(echo "$DYNAMIC_RESULT" | tail -n1)
+	# Line two, not the last line: a row with no ISO (Windows) gives one line,
+	# and the last line would then be its URL.
+	ISO=$(echo "$DYNAMIC_RESULT" | sed -n 2p)
 
 	if [ -z "${ISO}" ]; then
 		echo "  ✗ No ISO definition - skipping"
 		return
 	fi
 
+	# Work out what the image must hash to before touching it: fetch the
+	# distro's checksums and check their signature against the pinned key.
+	WORK=$(mktemp -d "${BASEDIR}/verify.XXXXXX") || {
+		echo "  ✗ Could not make a scratch directory in ${BASEDIR}"
+		return 1
+	}
+	expected_sum "$NAME" "$VER" "$URL" "$ISO" "$CSV_SHA256" "$WORK" || return 1
+
 	# Fetch the image, or refresh the cached copy when upstream has a newer one.
 	# Most upstream names (latest, current) never change, so a cache keyed on
 	# the file existing would build from the same old image forever. curl -R
 	# keeps upstream's timestamp on the file and -z only downloads when
 	# upstream is newer than it. Download to a .part file and only rename it
-	# into place once complete, so a partial download is never used. NULL means
-	# no public URL (RedHat): the image must already be in the cache.
+	# into place once complete and verified, so neither a partial nor a
+	# tampered download reaches the cache. It goes in 0644: the cache is a
+	# shared NFS export, and the server would otherwise make it 0777 (see the
+	# README). NULL means no public URL (RedHat): the image must already be in
+	# the cache.
 	if [ "${URL}" != "NULL" ]; then
 		echo "  → Checking ${ISO} upstream..."
 		rm -f "${ISODIR}/${ISO}.part"
@@ -327,23 +509,36 @@ process_template() {
 		if ! quiet curl -fsSL -R "$@" -o "${ISODIR}/${ISO}.part" "${URL}${ISO}"; then
 			rm -f "${ISODIR}/${ISO}.part"
 			echo "  ✗ Download failed"
-			return
+			return 1
 		elif [ -s "${ISODIR}/${ISO}.part" ]; then
+			if ! check_image "${ISODIR}/${ISO}.part" "$WORK"; then
+				rm -f "${ISODIR}/${ISO}.part"
+				return 1
+			fi
+			chmod 0644 "${ISODIR}/${ISO}.part"
 			mv "${ISODIR}/${ISO}.part" "${ISODIR}/${ISO}"
-			echo "  → Downloaded a newer ${ISO}"
+			echo "  → Downloaded a newer ${ISO} (verified)"
 		else
 			rm -f "${ISODIR}/${ISO}.part"
 		fi
 	fi
 	if [ ! -f "${ISODIR}/${ISO}" ]; then
 		echo "  ✗ ${ISO} is not in ${ISODIR}"
-		return
+		return 1
 	fi
 
 	TMPISO="${BASEDIR}/prod-${ISO}"
 
-	echo "  → Customizing image (ID: $TPROD)..."
+	# Verify the private working copy, not the cache: the copy is what gets
+	# built, and anything that can write to the share could swap the cached
+	# file after it was checked.
 	cp "${ISODIR}/${ISO}" "${TMPISO}"
+	if ! check_image "${TMPISO}" "$WORK"; then
+		echo "     The cached ${ISODIR}/${ISO} doesn't match upstream. Remove it to download it again."
+		return 1
+	fi
+
+	echo "  → Customizing image (ID: $TPROD)..."
 
 	# Build virt-customize command with batched operations
 	VIRT_CMD="virt-customize -a $TMPISO"
@@ -416,7 +611,7 @@ process_template() {
 		echo "  ✗ virt-customize failed for ${TNAME}:"
 		tail -n 5 "${TMPISO}.log" | sed 's/^/     /'
 		rm -f "$TMPISO" "${TMPISO}.log"
-		return
+		return 1
 	fi
 	rm -f "${TMPISO}.log"
 
@@ -428,12 +623,12 @@ process_template() {
 		EXISTING_NAME=$(qm config ${TPROD} 2>/dev/null | awk '/^name:/ {print $2}')
 		if [ "$EXISTING_NAME" != "$TNAME" ]; then
 			echo "  ✗ VMID ${TPROD} is '${EXISTING_NAME}', not ${TNAME}: refusing to destroy it"
-			return
+			return 1
 		fi
 		echo "  → Destroying existing template ${TPROD} (force rebuild)..."
 		quiet qm destroy ${TPROD} --destroy-unreferenced-disks 1 || {
 			echo "  ✗ Could not destroy template ${TPROD}, it may be in use"
-			return
+			return 1
 		}
 	fi
 
@@ -444,7 +639,7 @@ process_template() {
 		if qm status ${TPROD} >/dev/null 2>&1; then
 			cleanup_and_exit 1 "VM ${TPROD} already exists. Run template-clean.sh first."
 		fi
-		return
+		return 1
 	fi
 	echo "  → Importing disk..."
 	if ! IMPORT_OUTPUT=$(qm importdisk ${TPROD} "${TMPISO}" "${STORAGE}" 2>&1); then
@@ -452,7 +647,7 @@ process_template() {
 		echo "     Try: STORAGE=local-lvm ./template-generate.sh"
 		qm destroy ${TPROD} --destroy-unreferenced-disks 1 2>/dev/null
 		rm -f "$TMPISO"
-		return
+		return 1
 	fi
 
 	# Extract the actual disk name from import output
@@ -462,7 +657,7 @@ process_template() {
 		echo "     Try: STORAGE=local-lvm ./template-generate.sh"
 		qm destroy ${TPROD} --destroy-unreferenced-disks 1 2>/dev/null
 		rm -f "$TMPISO"
-		return
+		return 1
 	fi
 
 	echo "  → Configuring template..."
@@ -470,43 +665,43 @@ process_template() {
 		echo "  ✗ Could not attach disk to template ${TPROD}"
 		qm destroy ${TPROD} --destroy-unreferenced-disks 1 2>/dev/null
 		rm -f "$TMPISO"
-		return
+		return 1
 	fi
 	if ! quiet qm set $TPROD --ide3 "${STORAGE}":cloudinit; then
 		echo "  ✗ Could not create cloud-init disk for template ${TPROD}"
 		qm destroy ${TPROD} --destroy-unreferenced-disks 1 2>/dev/null
 		rm -f "$TMPISO"
-		return
+		return 1
 	fi
 	quiet qm set $TPROD --boot c --bootdisk scsi0 || {
 		echo "  ✗ Error setting boot"
-		return
+		return 1
 	}
 	quiet qm set $TPROD --serial0 socket --vga std || {
 		echo "  ✗ Error setting serial"
-		return
+		return 1
 	}
 	quiet qm set $TPROD --agent enabled=1 || {
 		echo "  ✗ Error setting agent"
-		return
+		return 1
 	}
 	quiet qm set $TPROD --tag "template,${LCNAME}" || {
 		echo "  ✗ Error setting tags"
-		return
+		return 1
 	}
 	quiet qm set $TPROD --ciupgrade 0 || {
 		echo "  ✗ Error setting ciupgrade"
-		return
+		return 1
 	}
 	quiet qm set $TPROD --ipconfig0 ip=dhcp || {
 		echo "  ✗ Error setting network"
-		return
+		return 1
 	}
 
 	echo "  → Converting to template..."
 	quiet qm template $TPROD || {
 		echo "  ✗ Failed to convert VM ${TPROD} to template"
-		return
+		return 1
 	}
 
 	echo "  ✓ Successfully created template ${TPROD}"
@@ -529,23 +724,76 @@ echo "Starting template generation..."
 # Check prerequisites before starting
 check_prerequisites
 
-TEMPLATE_COUNT=0
+ROWS=$(grep -Ev "^[[:space:]]*#" "$TEMPLATES" | grep -v "^[[:space:]]*$" | grep -v "Name,Version")
+FAILED=""
 
-# Count total templates for progress tracking
-TOTAL_TEMPLATES=$(cat $TEMPLATES | grep -Ev "^[[:space:]]*#" | grep -v "^[[:space:]]*$" | grep -cv "Name,Version")
+# What to build, one "INSTANCE|SUFFIX|CSV row" per line. Without TARGETS that's
+# every row at INSTANCE. With TARGETS it's only the rows named, each at the
+# VMID given: its instance is what the VMID adds to the row's base ID, and a
+# non-zero instance n is named -v<n+1>, so 12501 is template-Ubuntu-2404-v2.
+if [ -z "$TARGETS" ]; then
+	JOBS=$(printf '%s\n' "$ROWS" | sed "s/^/${INSTANCE_NUM}|${NAME_SUFFIX}|/")
+else
+	JOBS=""
+	for target in $TARGETS; do
+		key=${target%%=*}
+		vmid=${target#*=}
+		row=$(printf '%s\n' "$ROWS" | awk -F, -v k="$key" 'tolower($1) "-" $2 == k')
+		case "$vmid" in
+		"" | *[!0-9]*)
+			echo "  ✗ Target '${target}' needs a VMID, as in ubuntu-2404=12501"
+			FAILED="${FAILED} ${key}"
+			continue
+			;;
+		esac
+		if [ -z "$row" ] || [ "$key" = "$target" ]; then
+			echo "  ✗ Target ${key} has no row in ${TEMPLATES}"
+			FAILED="${FAILED} ${key}"
+			continue
+		fi
+		base=$(calculate_base_id "$(echo "$row" | awk -F, '{print $1}')" "$(echo "$row" | awk -F, '{print $2}')")
+		inst=$((vmid - base * 10))
+		if [ "$inst" -lt 0 ] || [ "$inst" -gt 99 ]; then
+			echo "  ✗ Target ${key}=${vmid}: ${key} builds at ${base}00 to ${base}99, not ${vmid}"
+			FAILED="${FAILED} ${key}"
+			continue
+		fi
+		suffix=""
+		[ "$inst" -ne 0 ] && suffix="-v$((inst + 1))"
+		JOBS="${JOBS}${inst}|${suffix}|${row}
+"
+	done
+fi
+JOBS=$(printf '%s\n' "$JOBS" | grep -v '^$')
+
+TEMPLATE_COUNT=0
+TOTAL_TEMPLATES=$(printf '%s\n' "$JOBS" | grep -c .)
 echo "Processing $TOTAL_TEMPLATES templates sequentially"
 
-# Process templates one by one
-cat $TEMPLATES | grep -Ev "^[[:space:]]*#" | grep -v "^[[:space:]]*$" | grep -v "Name,Version" | while IFS= read -r LINE; do
+# Process templates one by one. The loop reads a here-document rather than a
+# pipe so it runs in this shell and FAILED survives it, and each template's
+# commands read /dev/null so none of them can eat the rest of the list.
+while IFS='|' read -r JOB_INST JOB_SUFFIX LINE; do
+	[ -n "$LINE" ] || continue
 	TEMPLATE_COUNT=$((TEMPLATE_COUNT + 1))
 	echo ""
 	echo "=== [$TEMPLATE_COUNT/$TOTAL_TEMPLATES] Processing: $(echo "$LINE" | awk -F, '{print $1" "$2}') ==="
 	TMPISO=""
-	process_template "$LINE"
+	WORK=""
+	if ! process_template "$LINE" "$JOB_INST" "$JOB_SUFFIX" </dev/null; then
+		FAILED="${FAILED} $(echo "$LINE" | awk -F, '{print $1"-"$2}')"
+	fi
 	# Remove this template's working copy whatever the outcome. Only this one:
 	# a glob here once deleted another run's copy mid-import.
 	[ -n "$TMPISO" ] && rm -f "$TMPISO" "${TMPISO}.log"
-done
+	[ -n "$WORK" ] && rm -rf "$WORK"
+done <<EOF_JOBS
+$JOBS
+EOF_JOBS
 
 echo ""
+if [ -n "$FAILED" ]; then
+	echo "Template generation FAILED for:${FAILED}" >&2
+	exit 1
+fi
 echo "Template generation completed!"
