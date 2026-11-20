@@ -197,6 +197,7 @@ calculate_base_id() {
 	"Windows")
 		case "$version" in
 		2022) echo 2110 ;;
+		2025) echo 2120 ;;
 		*) echo 2190 ;;
 		esac
 		;;

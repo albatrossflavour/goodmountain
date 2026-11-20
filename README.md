@@ -18,7 +18,8 @@ The script started life in `proxform`, moved into igor as `scripts/template-gene
 | ---- | ------- |
 | `template-generate.sh` | Builds every template in `templates.csv` that doesn't already exist |
 | `template-clean.sh` | Destroys every Linux template (VMID below `20000`, name starting `template-`) so they can be rebuilt from scratch. Windows templates are left alone |
-| `templates.csv` | The list of templates to build: `Name,Version,URL,ISO,SHA256` |
+| `templates.csv` | The list of Linux templates to build: `Name,Version,URL,ISO,SHA256` |
+| `packer-windows.sh`, `packer/windows/` | Builds the Windows Server 2022 and 2025 templates with Packer, from the workstation. See [Windows templates](#windows-templates) |
 | `keys/` | The distro signing keys, pinned by fingerprint in `keys/fingerprints` |
 | `spec/` | rspec tests. They run the generator against fake `qm`, `curl` and friends, so nothing touches a host or the network |
 
@@ -46,7 +47,7 @@ By default a run is idempotent. The existence check happens before any download 
 
 igor runs it with `TARGETS` set to the VMIDs in its node map, so `./igor templates` builds exactly the templates the map clones and nothing beside them.
 
-A run exits non-zero if any template failed, after trying the rest. A row with no image (Windows) is skipped, not failed.
+A run exits non-zero if any template failed, after trying the rest. A row with no image is skipped, not failed. Windows templates aren't in the CSV: `packer-windows.sh` builds them.
 
 Every build checks upstream before it uses a cached image. The cache keeps upstream's timestamp on each file, and a newer upstream image replaces it, so a `latest` or `current` URL doesn't pin the template to whatever was downloaded first. A pinned URL (Oracle, Amazon Linux) only moves when its CSV row does. If upstream can't be reached the build of that template stops.
 
@@ -119,6 +120,23 @@ SELinux stays enforcing on EL images. Packages are installed with `virt-customiz
 
 EL images get `console=tty0` added to the kernel command line, alongside the `console=ttyS0,115200n8` the upstream images already carry, so the kernel logs to both consoles. Debian and Ubuntu images are set to the same `console=tty0 console=ttyS0,115200n8` pair (Ubuntu ships `console=tty1 console=ttyS0`, Debian ships `ttyS0,115200` without the parity), and `update-grub` regenerates `grub.cfg`.
 
+## Windows templates
+
+`packer-windows.sh` builds `template-Windows-2022` (21100) and `template-Windows-2025` (21200) with Packer and the pinned `hashicorp/proxmox` plugin, from the workstation rather than the host. The VMID is `calculate_base_id` from `template-generate.sh`, times ten. Run it through `op run`, with `OP_SERVICE_ACCOUNT_TOKEN` unset, so igor's Proxmox token reaches the plugin in the environment and never on a command line:
+
+```bash
+env -u OP_SERVICE_ACCOUNT_TOKEN op run --account thegreens.1password.com \
+  --env-file packer/windows/proxmox.env -- ./packer-windows.sh 2022
+```
+
+The Proxmox node downloads the Evaluation Center ISO and virtio-win 0.1.302 itself, checking each against its pinned sha256. The guest downloads cloudbase-init 1.1.9 and checks it against GitHub's published digest. The ISO URLs and checksums in `packer/windows/<version>.pkrvars.hcl` wait on accepting the Evaluation Center licence, and the build can't run until they're filled in.
+
+Each build generates a throwaway Administrator password, which it never prints, and opens WinRM over HTTP on the lab VLAN for the build's life. `finalise.ps1` then removes the answer files and restricts cloudbase-init's log directory. A one-shot SYSTEM task removes WinRM's listeners, its firewall rule, and the service, disables the built-in Administrator, and runs `sysprep /generalize /oobe /shutdown` with cloudbase-init's `Unattend.xml`. `wait-stopped.sh` waits for that shutdown before Packer makes the template.
+
+The template is UEFI with pre-enrolled keys and TPM 2.0, both on `ceph`, with the virtio drivers, the QEMU guest agent, and cloudbase-init. cloudbase-init reads the `configdrive2` drive only, and runs just the network, volume, and user-data plugins, with `debug=false`. It carries no credential and knows nothing of the node it becomes: igor's user-data names and onboards it.
+
+An existing template is skipped. `FORCE_REBUILD=true CONFIRM_DESTROY=<vmid>` replaces one, but only when that VMID holds a template of exactly the expected name, and nothing else is ever deleted.
+
 ## What it assumes about the host
 
 These are hardcoded, not configurable. They match the lab it was written for:
@@ -137,7 +155,9 @@ EL10 (RHEL, Rocky, Alma and Oracle 10) needs an x86-64-v3 CPU, which means AVX2.
 
 ```bash
 rspec spec
-shellcheck template-generate.sh template-clean.sh
+shellcheck template-generate.sh template-clean.sh packer-windows.sh packer/windows/wait-stopped.sh
 ```
 
 The spec makes throwaway signing keys, signs fixture checksum files with them, and runs the generator against fake `qm`, `virt-customize`, `ceph`, `rbd` and `curl`. `gpg`, `gpgv`, `openssl` and the checksum tools are real.
+
+`spec/windows_template_spec.rb` runs `packer fmt -check` and `packer validate` on `packer/windows`, which needs `packer init packer/windows` once to install the pinned plugin. It runs `packer-windows.sh` against fake `packer` and `curl`, so nothing reaches Proxmox. The two examples that check the Windows ISO pins stay pending until the licence gate fills them in.

@@ -18,4 +18,3 @@ Ubuntu,2204,DYNAMIC,DYNAMIC
 Ubuntu,2404,DYNAMIC,DYNAMIC
 Arch,1,https://geo.mirror.pkgbuild.com/images/latest/,Arch-Linux-x86_64-cloudimg.qcow2
 AmazonLinux,2,https://cdn.amazonlinux.com/os-images/2.0.20261118.0/kvm/,amzn2-kvm-2.0.20261118.0-x86_64.xfs.gpt.qcow2
-Windows,2022,NULL,
