@@ -29,13 +29,13 @@ variable "template_name" {
   type        = string
 }
 
-variable "iso_url" {
-  description = "The Evaluation Center ISO, which the Proxmox node downloads and checks itself."
+variable "iso_file" {
+  description = "The Evaluation Center ISO, staged on luggage as <storage>:iso/<file>."
   type        = string
 }
 
 variable "iso_checksum" {
-  description = "sha256:<hex> of that ISO."
+  description = "sha256:<hex> of that ISO, which packer-windows.sh checks on the node before building."
   type        = string
 }
 
@@ -63,9 +63,11 @@ variable "node" {
 }
 
 locals {
-  # virtio-win 0.1.302, from Fedora's archive. Fedora publishes no sha256, so
-  # this is the hash of the copy downloaded over HTTPS on 2026-11-20.
-  virtio_iso_url      = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-0.1.302.iso"
+  # virtio-win 0.1.302, staged on luggage from Fedora's archive
+  # (https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-0.1.302.iso).
+  # Fedora publishes no sha256, so this is the hash of the copy downloaded over
+  # HTTPS on 2026-11-20. packer-windows.sh checks the staged copy against it.
+  virtio_iso_file     = "luggage:iso/virtio-win-0.1.302.iso"
   virtio_iso_checksum = "sha256:303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d"
 
   # cloudbase-init 1.1.9, with the digest GitHub publishes for the release asset.
@@ -118,24 +120,22 @@ source "proxmox-iso" "windows" {
     vlan_tag = "7"
   }
 
+  # Both ISOs are staged on luggage rather than downloaded by the node, whose
+  # download-url refuses a file that already exists, so a second build or a
+  # rebuild would fail. The plugin doesn't check a staged ISO, so
+  # packer-windows.sh hashes each one on the node before building.
   boot_iso {
-    type             = "sata"
-    index            = 0
-    iso_url          = var.iso_url
-    iso_checksum     = var.iso_checksum
-    iso_storage_pool = "local"
-    iso_download_pve = true
-    unmount          = true
+    type     = "sata"
+    index    = 0
+    iso_file = var.iso_file
+    unmount  = true
   }
 
   additional_iso_files {
-    type             = "sata"
-    index            = 1
-    iso_url          = local.virtio_iso_url
-    iso_checksum     = local.virtio_iso_checksum
-    iso_storage_pool = "local"
-    iso_download_pve = true
-    unmount          = true
+    type     = "sata"
+    index    = 1
+    iso_file = local.virtio_iso_file
+    unmount  = true
   }
 
   # The answer CD: autounattend.xml, the build scripts, and cloudbase-init's

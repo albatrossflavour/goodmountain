@@ -42,9 +42,7 @@ RSpec.describe 'the Windows template build' do
 
     %w[2022 2025].each do |v|
       it "validates with the #{v} var file" do
-        # Until the licence gate pins the ISO, validate with a stand-in pin.
-        stand_in = read("#{v}.pkrvars.hcl").include?('PENDING') ? ['-var', "iso_checksum=sha256:#{'0' * 64}", '-var', 'iso_url=https://192.0.2.1/x.iso'] : []
-        out, status = Open3.capture2e(validate_env, 'packer', 'validate', "-var-file=#{File.join(WIN, "#{v}.pkrvars.hcl")}", *stand_in, WIN)
+        out, status = Open3.capture2e(validate_env, 'packer', 'validate', "-var-file=#{File.join(WIN, "#{v}.pkrvars.hcl")}", WIN)
         expect(status).to be_success, out
       end
     end
@@ -104,18 +102,30 @@ RSpec.describe 'the Windows template build' do
       expect(hcl).to match(/^\s*insecure_skip_tls_verify\s*=\s*false$/)
     end
 
-    it 'gives every downloaded ISO and MSI a sha256 checksum' do
-      checksums = (hcl + read('2022.pkrvars.hcl') + read('2025.pkrvars.hcl')).scan(/checksum\s*=\s*"([^"]*)"/).flatten
-      expect(checksums.size).to be >= 3
-      expect(hcl.scan(/iso_url\s*=/).size + hcl.scan(/msi_url\s*=/).size).to eq(hcl.scan(/(?:iso|msi)_checksum\s*=/).size)
-      checksums.reject { |c| c.include?('var.') || c == 'PENDING' }.each { |c| expect(c).to match(/\Asha256:[0-9a-f]{64}\z/) }
+    it 'gives every ISO and MSI a sha256 checksum' do
+      text = hcl + read('2022.pkrvars.hcl') + read('2025.pkrvars.hcl')
+      sources = text.scan(/^\s*(?:\w+_)?(?:iso_file|iso_url|msi_url)\s*=\s*"/).size
+      checksums = text.scan(/^\s*(?:\w+_)?(?:iso|msi)_checksum\s*=\s*"([^"]*)"/).flatten
+      expect(sources).to eq(4)
+      expect(checksums.size).to eq(sources)
+      checksums.each { |c| expect(c).to match(/\Asha256:[0-9a-f]{64}\z/) }
+    end
+
+    it 'boots from ISOs already staged on luggage, so the node never downloads one' do
+      expect(hcl).not_to match(/iso_download_pve|^\s*iso_url\s*=/)
+      expect(hcl).to match(/^\s*iso_file\s*=\s*var\.iso_file$/)
+      expect(hcl).to match(/^\s*iso_file\s*=\s*local\.virtio_iso_file$/)
+      expect(hcl[/^\s*virtio_iso_file\s*=\s*"([^"]+)"/, 1]).to eq('luggage:iso/virtio-win-0.1.302.iso')
     end
 
     %w[2022 2025].each do |v|
-      it "pins the #{v} Windows ISO by sha256" do
-        pending "the licence gate: Tony accepts the Evaluation Center terms and approves the #{v} ISO URL" if read("#{v}.pkrvars.hcl").include?('PENDING')
-        expect(read("#{v}.pkrvars.hcl")[/^iso_checksum\s*=\s*"([^"]+)"/, 1]).to match(/\Asha256:[0-9a-f]{64}\z/)
-        expect(read("#{v}.pkrvars.hcl")[/^iso_url\s*=\s*"([^"]+)"/, 1]).to start_with('https://')
+      it "pins the #{v} Windows ISO by sha256, and says where the hash came from" do
+        vars = read("#{v}.pkrvars.hcl")
+        expect(vars).not_to include('PENDING')
+        expect(vars[/^iso_checksum\s*=\s*"([^"]+)"/, 1]).to match(/\Asha256:[0-9a-f]{64}\z/)
+        expect(vars[/^iso_file\s*=\s*"([^"]+)"/, 1]).to match(%r{\Aluggage:iso/windows-server-#{v}-eval-[0-9.]+-en-us\.iso\z})
+        expect(vars).to match(%r{^# Source: https://})
+        expect(vars).to include("hashed from Microsoft's HTTPS download, no vendor-published hash")
       end
     end
   end
@@ -211,7 +221,16 @@ RSpec.describe 'the Windows template build' do
       def calls = File.exist?(@log) ? File.readlines(@log, chomp: true) : []
 
       # resources: what the API's cluster resource list holds, as [vmid, name, template].
-      def run_build(*args, env: {}, resources: [])
+      # Each staged volume and its pinned sha256, from the var files and the HCL.
+      def pins
+        files = %w[2022 2025].map { |v| read("#{v}.pkrvars.hcl") }.map do |t|
+          [t[/^iso_file\s*=\s*"([^"]+)"/, 1], t[/^iso_checksum\s*=\s*"sha256:([^"]+)"/, 1]]
+        end
+        files << [hcl[/^\s*virtio_iso_file\s*=\s*"([^"]+)"/, 1], hcl[/^\s*virtio_iso_checksum\s*=\s*"sha256:([^"]+)"/, 1]]
+        files.to_h
+      end
+
+      def run_build(*args, env: {}, resources: [], bad_hash: {})
         data = resources.map { |id, name, tmpl| %({"vmid":#{id},"name":"#{name}","node":"ankh","type":"qemu","template":#{tmpl ? 1 : 0}}) }
         gone = File.join(@dir, 'deleted')
         fake('curl', <<~SH)
@@ -221,6 +240,15 @@ RSpec.describe 'the Windows template build' do
           if [ -f #{gone} ]; then echo '{"data":[]}'; else echo '{"data":[#{data.join(',')}]}'; fi
         SH
         fake('packer', %(echo "packer args=$* log=${PACKER_LOG:-unset} pw=${#PKR_VAR_build_password}" >> #{@log}))
+        # The node hashes each staged ISO: the pinned hash unless the spec says otherwise.
+        hashes = pins.merge(bad_hash)
+        fake('ssh', <<~SH)
+          echo "ssh args=$*" >> #{@log}
+          case "$*" in
+          #{hashes.map { |vol, h| "*'#{vol}'*) echo '#{h}  /mnt/pve/luggage/template/iso/#{vol.split('/').last}' ;;" }.join("\n  ")}
+          *) echo "unknown volume" >&2; exit 1 ;;
+          esac
+        SH
         base = { 'PATH' => "#{@bin}:#{ENV.fetch('PATH')}", 'PROXMOX_URL' => 'https://192.0.2.10:8006/api2/json',
                  'PROXMOX_USERNAME' => 'spec@pve!spec', 'PROXMOX_TOKEN' => 'pve-token-value', 'PACKER_LOG' => nil,
                  'FORCE_REBUILD' => nil, 'CONFIRM_DESTROY' => nil }
@@ -242,6 +270,25 @@ RSpec.describe 'the Windows template build' do
         expect(build.first).to include('-on-error=cleanup', '-var-file=packer/windows/2022.pkrvars.hcl', 'log=unset')
         expect(build.first[/pw=(\d+)/, 1].to_i).to be >= 24
         expect(out).not_to match(/pw=|PKR_VAR_build_password=/)
+      end
+
+      it 'hashes the version\'s ISO and virtio-win on the node, checking its host key, before building' do
+        out, status = run_build('2025')
+        expect(status).to be_success, out
+        sshes = calls.grep(/^ssh /)
+        expect(sshes.size).to eq(2)
+        sshes.each { |c| expect(c).to include('StrictHostKeyChecking=yes', 'BatchMode=yes', 'root@ankh.lab.albatrossflavour.com', 'sha256sum') }
+        expect(sshes.join).to include(pins.keys.grep(/2025/).first, 'luggage:iso/virtio-win-0.1.302.iso')
+        expect(calls.index { |c| c.start_with?('ssh ') }).to be < calls.index { |c| c.start_with?('packer args=build') }
+      end
+
+      it 'refuses to build, or destroy anything, when a staged ISO does not match its pin' do
+        vol = pins.keys.grep(/2022/).first
+        out, status = run_build('2022', env: { 'FORCE_REBUILD' => 'true', 'CONFIRM_DESTROY' => '21100' },
+                                        resources: [[21_100, 'template-Windows-2022', true]], bad_hash: { vol => 'f' * 64 })
+        expect(status).not_to be_success
+        expect(out).to include(vol, 'does not match')
+        expect(calls.grep(/^packer args=build|DELETE/)).to be_empty
       end
 
       it 'unsets a PACKER_LOG it was given' do

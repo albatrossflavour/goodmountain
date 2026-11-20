@@ -62,6 +62,30 @@ pve() {
 		curl -fsS --max-time 30 --config -
 }
 
+# The ISOs are staged on luggage, and the plugin doesn't check a staged ISO, so
+# hash each on the node against its pin before building or destroying anything.
+pin() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\(.*\)\"\$/\1/p" "$2"; }
+verify_staged() {
+	local vol sum want got
+	while read -r vol sum; do
+		want="${sum#sha256:}"
+		if ! [[ "$vol" =~ ^[a-z0-9-]+:iso/[A-Za-z0-9._-]+$ && "$want" =~ ^[0-9a-f]{64}$ ]]; then
+			echo "Bad ISO pin: '${vol}' '${sum}'" >&2
+			exit 1
+		fi
+		echo "Checking ${vol} on ${node}"
+		got="$(ssh -n -o StrictHostKeyChecking=yes -o BatchMode=yes "root@${node}.lab.albatrossflavour.com" \
+			"sha256sum \"\$(pvesm path '${vol}')\"" | awk '{print $1}')"
+		if [ "$got" != "$want" ]; then
+			echo "${vol} on ${node} has sha256 ${got:-unknown}, which does not match its pin ${want}. Nothing built or destroyed." >&2
+			exit 1
+		fi
+	done <<EOF_PINS
+$(pin iso_file "$varfile") $(pin iso_checksum "$varfile")
+$(pin virtio_iso_file packer/windows/windows.pkr.hcl) $(pin virtio_iso_checksum packer/windows/windows.pkr.hcl)
+EOF_PINS
+}
+
 resources="$(pve GET 'cluster/resources?type=vm')"
 at_vmid="$(jq -r --argjson id "$vmid" '.data[] | select(.vmid == $id) | "\(.name)\t\(.template // 0)\t\(.node)"' <<<"$resources")"
 elsewhere="$(jq -r --arg n "$name" --argjson id "$vmid" '.data[] | select(.name == $n and .vmid != $id) | .vmid' <<<"$resources" | paste -sd' ' -)"
@@ -85,6 +109,10 @@ if [ -n "$at_vmid" ]; then
 		echo "VMID ${vmid} holds ${have_name} (template=${have_template}), not the template ${name}. Nothing destroyed." >&2
 		exit 1
 	fi
+fi
+
+verify_staged
+if [ -n "$at_vmid" ]; then
 	echo "Destroying template ${vmid} (${name}) on ${have_node} to rebuild it"
 	pve DELETE "nodes/${have_node}/qemu/${vmid}?purge=1&destroy-unreferenced-disks=1" >/dev/null
 	for _ in $(seq 1 60); do

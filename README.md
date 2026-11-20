@@ -129,7 +129,7 @@ env -u OP_SERVICE_ACCOUNT_TOKEN op run --account thegreens.1password.com \
   --env-file packer/windows/proxmox.env -- ./packer-windows.sh 2022
 ```
 
-The Proxmox node downloads the Evaluation Center ISO and virtio-win 0.1.302 itself, checking each against its pinned sha256. The guest downloads cloudbase-init 1.1.9 and checks it against GitHub's published digest. The ISO URLs and checksums in `packer/windows/<version>.pkrvars.hcl` wait on accepting the Evaluation Center licence, and the build can't run until they're filled in.
+The Evaluation Center ISOs and virtio-win 0.1.302 are staged once on `luggage` (`/mnt/pve/luggage/template/iso`), and the build boots from those copies. Proxmox's `download-url` refuses a file that already exists, so letting the node download them would fail every build after the first. The plugin doesn't check a staged ISO, so `packer-windows.sh` hashes each one on the node over ssh (host key checked) and refuses to build or destroy anything when it doesn't match its pin. Microsoft and Fedora publish no sha256 for these files, so the pins in `packer/windows/<version>.pkrvars.hcl` and `windows.pkr.hcl` are hashes of the copies downloaded over HTTPS, with each source URL recorded beside its pin. The guest downloads cloudbase-init 1.1.9 and checks it against GitHub's published digest.
 
 Each build generates a throwaway Administrator password, which it never prints, and opens WinRM over HTTP on the lab VLAN for the build's life. `finalise.ps1` then removes the answer files and restricts cloudbase-init's log directory. A one-shot SYSTEM task removes WinRM's listeners, its firewall rule, and the service, disables the built-in Administrator, and runs `sysprep /generalize /oobe /shutdown` with cloudbase-init's `Unattend.xml`. `wait-stopped.sh` waits for that shutdown before Packer makes the template.
 
@@ -160,4 +160,4 @@ shellcheck template-generate.sh template-clean.sh packer-windows.sh packer/windo
 
 The spec makes throwaway signing keys, signs fixture checksum files with them, and runs the generator against fake `qm`, `virt-customize`, `ceph`, `rbd` and `curl`. `gpg`, `gpgv`, `openssl` and the checksum tools are real.
 
-`spec/windows_template_spec.rb` runs `packer fmt -check` and `packer validate` on `packer/windows`, which needs `packer init packer/windows` once to install the pinned plugin. It runs `packer-windows.sh` against fake `packer` and `curl`, so nothing reaches Proxmox. The two examples that check the Windows ISO pins stay pending until the licence gate fills them in.
+`spec/windows_template_spec.rb` runs `packer fmt -check` and `packer validate` on `packer/windows`, which needs `packer init packer/windows` once to install the pinned plugin. It runs `packer-windows.sh` against fake `packer`, `curl`, and `ssh`, so nothing reaches Proxmox.
