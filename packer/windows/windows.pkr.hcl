@@ -148,8 +148,10 @@ source "proxmox-iso" "windows" {
     unmount          = true
     cd_label         = "PACKER"
     cd_files         = ["${path.root}/scripts/*", "${path.root}/cloudbase-init/*"]
+    # templatefile resolves a relative path against the config directory, not
+    # the working directory, so a relative path.root would be doubled.
     cd_content = {
-      "autounattend.xml" = templatefile("${path.root}/answer/autounattend.xml.pkrtpl", { build_password = var.build_password, image_index = var.image_index, virtio_os = var.virtio_os })
+      "autounattend.xml" = templatefile("${abspath(path.root)}/answer/autounattend.xml.pkrtpl", { build_password = var.build_password, image_index = var.image_index, virtio_os = var.virtio_os })
     }
   }
 

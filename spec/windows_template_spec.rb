@@ -41,8 +41,11 @@ RSpec.describe 'the Windows template build' do
     end
 
     %w[2022 2025].each do |v|
-      it "validates with the #{v} var file" do
-        out, status = Open3.capture2e(validate_env, 'packer', 'validate', "-var-file=#{File.join(WIN, "#{v}.pkrvars.hcl")}", WIN)
+      # From the repo root with relative paths, as packer-windows.sh runs it,
+      # so path.root is relative and templatefile's own base dir shows.
+      it "validates with the #{v} var file, run as packer-windows.sh runs it" do
+        out, status = Open3.capture2e(validate_env, 'packer', 'validate', "-var-file=packer/windows/#{v}.pkrvars.hcl",
+                                      'packer/windows', chdir: ROOT)
         expect(status).to be_success, out
       end
     end
