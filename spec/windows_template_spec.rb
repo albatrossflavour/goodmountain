@@ -161,6 +161,22 @@ RSpec.describe 'the Windows template build' do
     end
   end
 
+  describe 'first logon' do
+    # The proxmox plugin finds the VM's address through the QEMU guest agent,
+    # so the agent has to be running before Packer can reach WinRM at all.
+    # Installed by a provisioner it never ran: the first build waited on WinRM
+    # with no address to try.
+    it 'installs the guest agent at first logon, before WinRM, and not as a provisioner' do
+      commands = read('answer/autounattend.xml.pkrtpl')[%r{<FirstLogonCommands>(.*)</FirstLogonCommands>}m, 1]
+                 .scan(%r{<CommandLine>(.*?)</CommandLine>}).flatten
+      agent = commands.index { |c| c.include?('install-guest-tools.ps1') }
+      expect(agent).not_to be_nil
+      expect(commands[agent]).to include("Get-Volume -FileSystemLabel 'PACKER'")
+      expect(agent).to be < commands.index { |c| c.include?('winrm quickconfig') }
+      expect(hcl).not_to match(/provisioner "powershell" \{\s*script\s*=\s*"[^"]*install-guest-tools\.ps1"/)
+    end
+  end
+
   describe 'finalise.ps1' do
     let(:script) { read('scripts/finalise.ps1') }
 

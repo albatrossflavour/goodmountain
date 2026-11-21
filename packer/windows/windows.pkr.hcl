@@ -171,9 +171,8 @@ source "proxmox-iso" "windows" {
 build {
   sources = ["source.proxmox-iso.windows"]
 
-  provisioner "powershell" {
-    script = "${path.root}/scripts/install-guest-tools.ps1"
-  }
+  # install-guest-tools.ps1 runs at first logon (autounattend.xml), since the
+  # plugin needs the guest agent to find the address WinRM is on.
 
   provisioner "powershell" {
     script = "${path.root}/scripts/install-cloudbase-init.ps1"

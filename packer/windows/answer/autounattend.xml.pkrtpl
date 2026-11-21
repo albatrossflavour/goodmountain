@@ -131,26 +131,32 @@
           <PlainText>true</PlainText>
         </Password>
       </AutoLogon>
-      <!-- WinRM over HTTP with basic auth, for Packer only. finalise.ps1 takes it all out. -->
+      <!-- The guest agent first: the proxmox plugin finds the VM's address through it,
+           so Packer can't reach WinRM until it runs. Then WinRM over HTTP with basic
+           auth, for Packer only. finalise.ps1 takes it all out. -->
       <FirstLogonCommands>
         <SynchronousCommand wcm:action="add">
           <Order>1</Order>
-          <CommandLine>powershell.exe -NoProfile -Command "Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private"</CommandLine>
+          <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "&amp; ([string](Get-Volume -FileSystemLabel 'PACKER').DriveLetter + ':\install-guest-tools.ps1')"</CommandLine>
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add">
           <Order>2</Order>
-          <CommandLine>cmd.exe /c winrm quickconfig -q</CommandLine>
+          <CommandLine>powershell.exe -NoProfile -Command "Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private"</CommandLine>
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add">
           <Order>3</Order>
-          <CommandLine>cmd.exe /c winrm set winrm/config/service @{AllowUnencrypted="true"}</CommandLine>
+          <CommandLine>cmd.exe /c winrm quickconfig -q</CommandLine>
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add">
           <Order>4</Order>
-          <CommandLine>cmd.exe /c winrm set winrm/config/service/auth @{Basic="true"}</CommandLine>
+          <CommandLine>cmd.exe /c winrm set winrm/config/service @{AllowUnencrypted="true"}</CommandLine>
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add">
           <Order>5</Order>
+          <CommandLine>cmd.exe /c winrm set winrm/config/service/auth @{Basic="true"}</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>6</Order>
           <CommandLine>powershell.exe -NoProfile -Command "New-NetFirewallRule -DisplayName 'Packer WinRM' -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow"</CommandLine>
         </SynchronousCommand>
       </FirstLogonCommands>
