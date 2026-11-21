@@ -9,9 +9,23 @@
 # deletes it once expired, on a clone's first boot at the latest.
 $ErrorActionPreference = 'Stop'
 
-# The answer files.
+# The answer files. Setup keeps a copy of the build's own, credentials and all, as
+# unattend-original.xml.
 Remove-Item -Path 'C:\Windows\Panther\unattend.xml' -Force -ErrorAction SilentlyContinue
+Remove-Item -Path 'C:\Windows\Panther\unattend-original.xml' -Force -ErrorAction SilentlyContinue
 Remove-Item -Path 'C:\Windows\Panther\Unattend\*' -Recurse -Force -ErrorAction SilentlyContinue
+
+# A clone's specialize pass caches the sysprep /unattend file as
+# Panther\unattend.xml. It holds no secret, but it goes too: SetupComplete.cmd
+# runs as SYSTEM once setup has finished, before anyone can log on, removes
+# the cached copies, and then itself.
+New-Item -ItemType Directory -Path 'C:\Windows\Setup\Scripts' -Force | Out-Null
+@'
+@echo off
+del /f /q "%WINDIR%\Panther\unattend.xml" "%WINDIR%\Panther\unattend-original.xml" 2>nul
+rd /s /q "%WINDIR%\Panther\Unattend" 2>nul
+del /f /q "%~f0"
+'@ | Set-Content -Path 'C:\Windows\Setup\Scripts\SetupComplete.cmd' -Encoding ascii
 
 # cloudbase-init's log can hold user-data output, so only SYSTEM and
 # Administrators read it, not Users.

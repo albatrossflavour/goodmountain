@@ -180,8 +180,22 @@ RSpec.describe 'the Windows template build' do
   describe 'finalise.ps1' do
     let(:script) { read('scripts/finalise.ps1') }
 
-    it 'removes the answer files' do
-      expect(script).to include('C:\\Windows\\Panther\\unattend.xml', 'C:\\Windows\\Panther\\Unattend\\*')
+    # Setup keeps the build's answer file, build password and all, as
+    # unattend-original.xml, readable by Users. Found on the proof node.
+    it 'removes the answer files, setup\'s unattend-original.xml copy included' do
+      expect(script).to include('C:\\Windows\\Panther\\unattend.xml', 'C:\\Windows\\Panther\\Unattend\\*',
+                                'C:\\Windows\\Panther\\unattend-original.xml')
+    end
+
+    # Specialize caches the sysprep /unattend file as Panther\unattend.xml on
+    # a clone's first boot, after the build is over, so the clone removes it
+    # itself once setup is done with it: SetupComplete.cmd runs as SYSTEM at
+    # the end of setup, before anyone can log on.
+    it 'leaves a SetupComplete.cmd that removes setup\'s cached answer files on first boot, then itself' do
+      cmd = script[/@'\r?\n(.*?)\r?\n'@ \| Set-Content -Path 'C:\\Windows\\Setup\\Scripts\\SetupComplete\.cmd'/m, 1]
+      expect(cmd).not_to be_nil
+      expect(cmd).to include('del /f /q "%WINDIR%\\Panther\\unattend.xml"', '"%WINDIR%\\Panther\\unattend-original.xml"',
+                             'rd /s /q "%WINDIR%\\Panther\\Unattend"', 'del /f /q "%~f0"')
     end
 
     it 'removes WinRM: its listeners, the firewall rule Packer opened, and the service' do
